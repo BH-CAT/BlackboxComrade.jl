@@ -18,8 +18,10 @@ function refine_pixels(g, k::Integer)
     CB = Comrade.ComradeBase
     # Pixel centers of the refined axis: the outer edges of `x`'s first and last pixels stay put.
     fine(x) = (h = (k - 1) * step(x) / 2k; LinRange(first(x) - h, last(x) + h, k * length(x)))
-    return CB.RectiGrid((; X = fine(g.X), Y = fine(g.Y));
-        executor = CB.executor(g), header = CB.metadata(g), posang = CB.posang(g))
+    return CB.RectiGrid(
+        (; X = fine(g.X), Y = fine(g.Y));
+        executor = CB.executor(g), header = CB.metadata(g), posang = CB.posang(g)
+    )
 end
 
 # Image plotting via CairoMakie (always available).
