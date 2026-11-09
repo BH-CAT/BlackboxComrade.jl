@@ -379,8 +379,10 @@ function trajectory_report(path, names, X, h, L, steps_per_draw, d)
     n, K = size(X, 2), size(X, 3)
     τ = KineticSamplers.multichain_times(X)
     rows = [
-        (; name, tau_steps = t * steps_per_draw, ess = n * K / t, R = t * steps_per_draw * h / L,
-            resolved = t < n / 10)
+        (;
+                name, tau_steps = t * steps_per_draw, ess = n * K / t, R = t * steps_per_draw * h / L,
+                resolved = t < n / 10,
+            )
             for (name, t) in zip(names, τ) if isfinite(t)
     ]
     isempty(rows) && (@warn "no scalar parameter varies over the draws; no trajectory report"; return nothing)
@@ -388,15 +390,23 @@ function trajectory_report(path, names, X, h, L, steps_per_draw, d)
     sq = sqrt(d)
     @info @sprintf(
         "MCLMC autocorrelation times at step size %.4g and trajectory length %.4g = %.3g √d (R = τ h / L): %s",
-        h, L, L / sq, join((@sprintf("%s τ %s%.0f steps, ESS %.0f, R %.2g", r.name,
-            r.resolved ? "" : "≥ ", r.tau_steps, r.ess, r.R) for r in first(rows, TRAJECTORY_REPORTED)), "; ")
+        h, L, L / sq, join(
+            (
+                @sprintf(
+                        "%s τ %s%.0f steps, ESS %.0f, R %.2g", r.name,
+                        r.resolved ? "" : "≥ ", r.tau_steps, r.ess, r.R
+                    ) for r in first(rows, TRAJECTORY_REPORTED)
+            ), "; "
+        )
     )
     open(path, "w") do io
-        TOML.print(io, Dict(
-            "step_size" => h, "trajectory_length" => L, "trajectory_length_sqrt_d" => L / sq,
-            "steps_per_draw" => steps_per_draw, "draws_per_chain" => n, "chains" => K,
-            "parameters" => [Dict(String(k) => v for (k, v) in pairs(r)) for r in rows],
-        ))
+        TOML.print(
+            io, Dict(
+                "step_size" => h, "trajectory_length" => L, "trajectory_length_sqrt_d" => L / sq,
+                "steps_per_draw" => steps_per_draw, "draws_per_chain" => n, "chains" => K,
+                "parameters" => [Dict(String(k) => v for (k, v) in pairs(r)) for r in rows],
+            )
+        )
     end
     return nothing
 end
@@ -573,9 +583,9 @@ function _log_warmup(::KineticSamplers.MCLMC, params, history, d, seconds)
         seconds, params.step_size, params.trajectory_length,
         params.trajectory_length / sqrt(d), size(params.inverse_mass.vecs, 2),
         isnothing(c) ? ", no step-size cap" : @sprintf(
-            ", step-size cap %.4g at the median curvature %.4g (0.99 quantile %.4g, max %.4g over %d positions)",
-            c.step_size_cap, c.curvature, c.p99, c.max, c.positions
-        )
+                ", step-size cap %.4g at the median curvature %.4g (0.99 quantile %.4g, max %.4g over %d positions)",
+                c.step_size_cap, c.curvature, c.p99, c.max, c.positions
+            )
     )
     return nothing
 end
