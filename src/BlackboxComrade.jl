@@ -28,7 +28,7 @@ import KineticSamplers
 using FillArrays
 import ProbabilityTransports as PT
 import TransformVariables as TV
-using Statistics: cor, mean, median, std
+using Statistics: cor, mean, median, std, var
 using VLBIFiles
 using DataFrames
 using CSV

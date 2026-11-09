@@ -14,6 +14,7 @@ const CAP_QUANTILE = 0.5
 const MCLACHLAN_CAP_PHASE = 0.7
 const BIAS_ESS = 100
 const BIAS_CHECK = KineticSamplers.BiasCheck(; ess = BIAS_ESS)
+const FINAL_TREND_BLOCKS = 5
 
 """
     LatentTarget(tpost, dim)
@@ -65,21 +66,29 @@ WALNUTS) on `post` in the latent space of `strategy.latent_space`, compiled with
 jittered by `$(KINETIC_START_JITTER)` standard normals per latent coordinate, or chain `k` at
 `starts[k]` when `starts` is given. A `PooledAdaptation` of `strategy.nadapt` MCLMC steps or
 WALNUTS draws per chain, in blocks of `strategy.chunk_size` MCLMC steps or of KineticSamplers'
-default length for WALNUTS, adapts one step size and one low-rank inverse mass with stiff
-directions for all chains. The MCLMC step size follows its energy error and, once the inverse
-mass is final, is capped at the step size for which a harmonic mode of the median whitened
-curvature at positions of the warmup's records advances by the phase
-[`mclmc_cap_phase`](@ref) per step (`curvature_quantile = $(CAP_QUANTILE)`). MCLMC warms up
-without step halving,
-except with `integrator = "baoab"`, whose warmup halves steps as its sampling does. Its history
-and parameters go to `out/mclmc_warmup.jls` or `out/walnuts_warmup.jls`. With
-`strategy.trajectory_length`, the MCLMC warmup runs no window and the trajectory length is
-`strategy.trajectory_length` times √d, and with `strategy.step_size` MCLMC samples at that step
-size instead of the warmup's. After the MCLMC warmup, `KineticSamplers.measure_bias` estimates
-the bias of the sampling parameters from coupled runs of $(BIAS_CHECK.steps) steps with one
-and two substeps. Its tolerances are the Monte Carlo errors at an effective sample size of
-$(BIAS_ESS): $(round(BIAS_CHECK.max_mean_bias; sigdigits = 3)) standard deviations in a mean
-and $(round(BIAS_CHECK.max_variance_bias; sigdigits = 3)) of a variance. With
+default length for WALNUTS, adapts one step size and one low-rank inverse mass with
+`strategy.stiff_directions` stiff directions, each estimate from `strategy.stiff_draws` draws,
+for all chains. The MCLMC step size follows its energy error and is capped at the step size for
+which a harmonic mode of the median whitened curvature at positions of the warmup's records
+advances by the phase [`mclmc_cap_phase`](@ref) per step (`curvature_quantile = $(CAP_QUANTILE)`).
+The MCLMC warmup sets its trajectory length from the autocorrelation times of the rows
+`strategy.trajectory_rows`, by their mean or their `strategy.trajectory_quantile` quantile, moves
+it by `strategy.refit_trajectory_step` after each refit, runs `strategy.window_iterations`
+windows after the adaptation, and ends with a final phase of `strategy.final` steps per chain.
+MCLMC warms up without step halving, except with `integrator = "baoab"`, whose warmup halves
+steps as its sampling does. Its history and parameters go to `out/mclmc_warmup.jls` or
+`out/walnuts_warmup.jls`. While it runs, `out/warmup` holds a `WarmupRecord`: each chain's log
+density after every block in `out/warmup/trace.jls`, rewritten at each logged block (every
+$(KINETIC_LOG_DRAWS) draws' worth of blocks), and its position at each logged block as a draw of
+`out/warmup/chain_k`. After a final phase, a warning names the scalar parameters that still
+trend in it (see [`warn_trends`](@ref)). With `strategy.trajectory_length`, the MCLMC warmup runs
+no window and the trajectory length is `strategy.trajectory_length` times √d, and with
+`strategy.step_size` MCLMC samples at that step size instead of the warmup's. After the MCLMC
+warmup, `KineticSamplers.measure_bias` estimates the bias of the sampling parameters from
+coupled runs of $(BIAS_CHECK.steps) steps with one and two substeps. Its tolerances are the
+Monte Carlo errors at an effective sample size of $(BIAS_ESS):
+$(round(BIAS_CHECK.max_mean_bias; sigdigits = 3)) standard deviations in a mean and
+$(round(BIAS_CHECK.max_variance_bias; sigdigits = 3)) of a variance. With
 `strategy.bias_tuning`, `KineticSamplers.tune_step_size` reduces the step size until the
 estimates are within them, logging each round, and the warmup file holds the reduced step size.
 Without it the estimate is logged, with a warning if it exceeds them, and sampling continues at
@@ -90,12 +99,14 @@ follow, whose energy statistics are logged per chain; if they fail
 With `resume`, MCLMC sampling whose warmup finished (`out/mclmc_warmup.jls`) and which wrote
 draws continues instead: no warmup, the parameters of that file, each chain from its last draw,
 appending draws until `strategy.nsample`, without the bias check or tuning; the trajectory report then
-covers all draws. Without draws it starts afresh.
+covers all draws. Without draws it starts afresh, which needs `out/warmup` moved away.
 
 Sampling keeps `strategy.nsample` draws per chain, chain `k` written as a Comrade sample
-directory `out/chain_k`: the last position of each block for MCLMC, every draw for WALNUTS
+directory `out/chain_k`: for MCLMC the last position of every `strategy.thin`-th block, so the
+chains run `strategy.nsample * strategy.thin` blocks and each kept draw's `num_grads`, `time`,
+`divergent` and `halved` count all the blocks since the previous kept draw; every draw for WALNUTS
 (`WALNUTS(; max_depth = strategy.max_tree_depth)`). The moves of `strategy` run on every chain
-during the warmup's adaptation phase and sampling, every $(MCLMC_MOVE_BLOCKS) blocks for MCLMC
+in every phase of the warmup and in sampling, every $(MCLMC_MOVE_BLOCKS) blocks for MCLMC
 and every $(WALNUTS_MOVE_BLOCKS) blocks for WALNUTS; a chain that moved restarts at its new position. Returns about
 $(KINETIC_RETURNED_DRAWS) draws, evenly thinned from each chain, as a draws × chains
 `PosteriorSamples`; the chains on disk keep every draw (see [`load_kinetic_chains`](@ref)).
@@ -132,16 +143,22 @@ function sample_kinetic(out, post, xopt, strategy::FittingStrategy, rng; starts 
         "$(strategy.nsample) draws per chain are not a whole number of blocks of $(layout.draws)"
     )
     log_blocks = cld(KINETIC_LOG_DRAWS, layout.draws)
+    stiff = KineticSamplers.StiffDirections(;
+        directions = strategy.stiff_directions, draws = strategy.stiff_draws
+    )
     mass = KineticSamplers.HistoryMassAdaptation(;
-        max_rank = 100, max_wide = 80, stiff = KineticSamplers.StiffDirections(),
-        vecs_eltype = Float32
+        max_rank = 100, max_wide = 80, stiff, vecs_eltype = Float32
     )
     adapt = if alg isa KineticSamplers.WALNUTS
         KineticSamplers.PooledAdaptation(nadapt; mass)
     else
         KineticSamplers.PooledAdaptation(
             nadapt; mass, block, window = isnothing(strategy.trajectory_length) ? nothing : 0,
-            curvature_quantile = CAP_QUANTILE, max_mode_phase = mclmc_cap_phase(alg, strategy),
+            final = strategy.final, curvature_quantile = CAP_QUANTILE,
+            max_mode_phase = mclmc_cap_phase(alg, strategy),
+            trajectory_rows = Symbol(strategy.trajectory_rows),
+            strategy.trajectory_quantile, strategy.refit_trajectory_step,
+            strategy.window_iterations,
         )
     end
     warmup_block = KineticSamplers.block_length(adapt, warmup_alg)
@@ -194,24 +211,45 @@ function sample_kinetic(out, post, xopt, strategy::FittingStrategy, rng; starts 
             name, done, strategy.nsample, host_params.step_size, host_params.trajectory_length, warmup_file
         )
     else
+        ispath(joinpath(out, "warmup")) && error(
+            "$(joinpath(out, "warmup")) exists; the warmup starts afresh, so move the earlier warmup record away"
+        )
         @info "$name: $K chains on $d latent coordinates, warmup $nadapt $(layout.unit) per chain in " *
-            "blocks of $warmup_block, $(strategy.nsample) draws per chain; $(repr(alg))"
+            "blocks of $warmup_block, $(strategy.nsample) draws per chain" *
+            (strategy.thin > 1 ? ", one every $(strategy.thin) blocks" : "") * "; $(repr(alg))"
+        record = WarmupRecord(joinpath(out, "warmup"), K)
+        final_scalars = Vector{Vector{Pair{String, Float64}}}[]
         t0 = time()
         function between_blocks(chains, info)
             collect_device_garbage(info.block)
-            if !isnothing(moves) && info.phase === :adaptation && info.block % layout.move_blocks == 0
-                chains = move_chains(chains, :warmup, info.steps, nadapt)
+            logp = Array(chains.state.logp)
+            record_block!(record, info, time() - t0, logp)
+            if info.block % log_blocks == 0
+                Θh = Array(chains.state.θ)
+                record_positions!(record, info, logp, [Comrade.transform(tb, Θh[:, k]) for k in axes(Θh, 2)])
+                write_trace(record)
+                @info @sprintf(
+                    "%s warmup, %s block %d: %d %s per chain, log density %s (%.0f s)",
+                    name, info.phase, info.block, info.steps, layout.unit,
+                    join((@sprintf("%.0f", l) for l in logp), " "), time() - t0
+                )
             end
-            info.block % log_blocks == 0 && @info @sprintf(
-                "%s warmup, %s block %d: %d %s per chain (%.0f s)",
-                name, info.phase, info.block, info.steps, layout.unit, time() - t0
-            )
+            if info.phase === :final && info.block % FINAL_TREND_BLOCKS == 0
+                Θh = Array(chains.state.θ)
+                push!(final_scalars, [scalar_leaves(Comrade.transform(tb, Θh[:, k])) for k in axes(Θh, 2)])
+            end
+            if !isnothing(moves) && info.block % layout.move_blocks == 0
+                total = info.phase === :adaptation ? nadapt : nothing
+                chains = move_chains(chains, :warmup, info.steps, total)
+            end
             _flush_logs()
             return chains
         end
         chains, params, history = KineticSamplers.warmup(
             host_rngs(K), target, adapt, warmup_alg, Θ; between_blocks, check = false
         )
+        write_trace(record)
+        foreach(flush_draws!, record.writers)
         if alg isa KineticSamplers.MCLMC
             h = something(strategy.step_size, params.step_size)
             L = isnothing(strategy.trajectory_length) ? params.trajectory_length :
@@ -224,6 +262,7 @@ function sample_kinetic(out, post, xopt, strategy::FittingStrategy, rng; starts 
             params = KineticSamplers.IsokineticParameters(h, L, params.inverse_mass)
         end
         _log_warmup(alg, params, history, d, time() - t0)
+        alg isa KineticSamplers.MCLMC && strategy.final > 0 && warn_trends(final_scalars)
         if alg isa KineticSamplers.MCLMC && strategy.bias_tuning
             params, chains = _tune_step_size(rngs, target, alg, params, chains, d)
         end
@@ -241,33 +280,41 @@ function sample_kinetic(out, post, xopt, strategy::FittingStrategy, rng; starts 
     scalar_names = String[]
     alg isa KineticSamplers.MCLMC && _read_scalars!(scalars, scalar_names, chain_dirs, done)
     health = nothing
-    nblocks = strategy.nsample ÷ layout.draws
+    thin = strategy.thin
+    nblocks = strategy.nsample * thin ÷ layout.draws
+    ndraws = nblocks * layout.draws
+    seen, pending = 0, nothing
     t0 = time()
-    for b in (done ÷ layout.draws + 1):nblocks
+    for b in (done * thin ÷ layout.draws + 1):nblocks
         tb0 = time()
         chains, trace = KineticSamplers.run_block(
             rngs, target, alg, params, chains, trace, block, layout.recorder
         )
         draws = block_draws(alg, chains, trace, time() - tb0)
         for (Θh, stats) in draws
+            counts = [draw_health(alg, s) for s in stats]
+            health = isnothing(health) ? counts : map((a, c) -> map(+, a, c), health, counts)
+            pending = isnothing(pending) ? stats : map(merge_draw_stats, pending, stats)
+            seen += 1
+            seen % thin == 0 || continue
             for (k, w) in pairs(writers)
                 θ = Comrade.transform(tb, Θh[:, k])
-                push_draw!(w, θ; stats[k]...)
+                push_draw!(w, θ; pending[k]...)
+                alg isa KineticSamplers.MCLMC || continue
                 leaves = scalar_leaves(θ)
                 isempty(scalar_names) && append!(scalar_names, first.(leaves))
                 push!(scalars[k], last.(leaves))
             end
-            counts = [draw_health(alg, s) for s in stats]
-            health = isnothing(health) ? counts : map((a, c) -> map(+, a, c), health, counts)
+            pending = nothing
         end
         if !isnothing(moves) && b % layout.move_blocks == 0
-            chains = move_chains(chains, :sampling, b * layout.draws, strategy.nsample)
+            chains = move_chains(chains, :sampling, b * layout.draws, ndraws)
         end
         collect_device_garbage(b)
         if b % log_blocks == 0 || b == nblocks
             @info @sprintf(
                 "%s sampling %d/%d draws per chain: %s, log density %s (%.0f s)",
-                name, b * layout.draws, strategy.nsample, _health_text(health),
+                name, done + seen ÷ thin, strategy.nsample, _health_text(health),
                 join((@sprintf("%.0f", s.logp) for s in last(last(draws))), " "), time() - t0
             )
             _flush_logs()
@@ -278,7 +325,7 @@ function sample_kinetic(out, post, xopt, strategy::FittingStrategy, rng; starts 
         X = stack(reduce(hcat, s) for s in scalars)
         trajectory_report(
             joinpath(out, "trajectory_report.toml"), scalar_names, X, host_params.step_size,
-            host_params.trajectory_length, block, d
+            host_params.trajectory_length, thin * block, d
         )
     end
     isnothing(moves) || foreach(move_summary(moves)) do m
@@ -401,6 +448,12 @@ block_layout(::KineticSamplers.MCLMC, block) = (;
 )
 block_layout(::KineticSamplers.WALNUTS, block) = (;
     unit = "draws", draws = block, move_blocks = WALNUTS_MOVE_BLOCKS, recorder = KineticSamplers.RecordPositions(),
+)
+
+# The statistics of the MCLMC blocks `a` then `b` taken together, as kept for a thinned draw.
+merge_draw_stats(a, b) = (;
+    logp = b.logp, num_grads = a.num_grads + b.num_grads, time = a.time + b.time,
+    divergent = a.divergent + b.divergent, halved = a.halved + b.halved,
 )
 
 # The draws of a sampling block that took `seconds`, as (positions `d × K`, statistics of each
@@ -594,30 +647,30 @@ function _log_warmup(::KineticSamplers.WALNUTS, params, history, d, seconds)
 end
 
 """
-    ChainDrawWriter(dir)
+    ChainDrawWriter(dir, per_file=$(KINETIC_DRAWS_PER_FILE))
 
 Draws of one chain written to `dir` as a Comrade sample directory (`samples/output_scan_*.jls`
-and `parameters.jls`), $(KINETIC_DRAWS_PER_FILE) draws per file, readable with
-`Comrade.load_samples(dir)` while the chain runs. A `dir` that holds draws is appended to.
+and `parameters.jls`), `per_file` draws per file, readable with `Comrade.load_samples(dir)`
+while the chain runs. A `dir` that holds draws is appended to.
 """
 mutable struct ChainDrawWriter
     dir::String
+    per_file::Int
     samples::Vector{Any}
     stats::Vector{NamedTuple}
     files::Int
     draws::Int
 end
 
-function ChainDrawWriter(dir)
+function ChainDrawWriter(dir, per_file = KINETIC_DRAWS_PER_FILE)
     p = joinpath(dir, "parameters.jls")
-    isfile(p) || return ChainDrawWriter(mkpath(dir), Any[], NamedTuple[], 0, 0)
+    isfile(p) || return ChainDrawWriter(mkpath(dir), per_file, Any[], NamedTuple[], 0, 0)
     o = deserialize(p).params
-    o.stride == KINETIC_DRAWS_PER_FILE && o.nsamples == o.nfiles * o.stride || error(
-        "$dir holds $(o.nsamples) draws in $(o.nfiles) files of $(o.stride); draws can be appended only to full files of $(KINETIC_DRAWS_PER_FILE)"
+    o.stride == per_file && o.nsamples == o.nfiles * o.stride || error(
+        "$dir holds $(o.nsamples) draws in $(o.nfiles) files of $(o.stride); draws can be appended only to full files of $per_file"
     )
-    return ChainDrawWriter(dir, Any[], NamedTuple[], o.nfiles, o.nsamples)
+    return ChainDrawWriter(dir, per_file, Any[], NamedTuple[], o.nfiles, o.nsamples)
 end
-
 # The draws per chain already written to `chain_dirs` (0 without any), which must agree.
 function _written_draws(chain_dirs)
     counts = map(chain_dirs) do dir
@@ -646,7 +699,7 @@ end
 function push_draw!(w::ChainDrawWriter, θ; stats...)
     push!(w.samples, θ)
     push!(w.stats, NamedTuple(stats))
-    length(w.samples) == KINETIC_DRAWS_PER_FILE && flush_draws!(w)
+    length(w.samples) == w.per_file && flush_draws!(w)
     return w
 end
 
@@ -662,9 +715,105 @@ function flush_draws!(w::ChainDrawWriter)
     )
     serialize(
         joinpath(w.dir, "parameters.jls"),
-        (; params = Comrade.DiskOutput(abspath(w.dir), w.files, KINETIC_DRAWS_PER_FILE, w.draws))
+        (; params = Comrade.DiskOutput(abspath(w.dir), w.files, w.per_file, w.draws))
     )
     empty!(w.samples)
     empty!(w.stats)
     return w
+end
+
+"""
+    WarmupRecord(dir, K)
+
+The warmup of `K` chains as it runs, under `dir`. `record_block!` keeps each chain's
+log density after every block; `write_trace` writes them to `dir/trace.jls` as
+`(; block, phase, steps, seconds, logp)`, with `logp` a chains × blocks matrix and `seconds`
+counted from the start of the warmup. `record_positions!` writes the chains' positions
+as one draw each of the Comrade sample directories `dir/chain_k`, one draw per file, with the
+statistics `logp`, `phase`, `block` and `steps`.
+"""
+struct WarmupRecord
+    dir::String
+    block::Vector{Int}
+    phase::Vector{Symbol}
+    steps::Vector{Int}
+    seconds::Vector{Float64}
+    logp::Vector{Vector{Float64}}
+    writers::Vector{ChainDrawWriter}
+end
+
+WarmupRecord(dir, K) = WarmupRecord(
+    mkpath(dir), Int[], Symbol[], Int[], Float64[], Vector{Float64}[],
+    [ChainDrawWriter(joinpath(dir, "chain_$k"), 1) for k in 1:K]
+)
+
+function record_block!(r::WarmupRecord, info, seconds, logp)
+    length(logp) == length(r.writers) ||
+        throw(DimensionMismatch("$(length(logp)) log densities for $(length(r.writers)) chains"))
+    push!(r.block, info.block)
+    push!(r.phase, info.phase)
+    push!(r.steps, info.steps)
+    push!(r.seconds, seconds)
+    push!(r.logp, collect(Float64, logp))
+    return r
+end
+
+function record_positions!(r::WarmupRecord, info, logp, positions)
+    length(positions) == length(r.writers) == length(logp) || throw(
+        DimensionMismatch("$(length(positions)) positions and $(length(logp)) log densities for $(length(r.writers)) chains")
+    )
+    for (w, x, l) in zip(r.writers, positions, logp)
+        push_draw!(w, x; logp = l, info.phase, info.block, info.steps)
+    end
+    return r
+end
+
+# Written to a temporary file and renamed, so `trace.jls` is always a complete trace.
+function write_trace(r::WarmupRecord)
+    file = joinpath(r.dir, "trace.jls")
+    logp = isempty(r.logp) ? zeros(length(r.writers), 0) : reduce(hcat, r.logp)
+    serialize(file * ".tmp", (; r.block, r.phase, r.steps, r.seconds, logp))
+    mv(file * ".tmp", file; force = true)
+    return file
+end
+
+"""
+    warn_trends(samples; threshold = 1)
+
+Warns about the scalar parameters that trend over `samples`, a vector over time of the
+`scalar_leaves` of every chain: those whose mean moves between the first and second half of the
+samples in the same direction in every chain, by more than `threshold` times the standard
+deviation within a half, pooled over chains and halves. Needs at least four samples and two
+chains, and warns that it cannot check otherwise.
+"""
+function warn_trends(samples; threshold = 1)
+    n = length(samples)
+    K = isempty(samples) ? 0 : length(first(samples))
+    if n < 4 || K < 2
+        @warn "the warmup's final phase gave $n positions of $K chains, too few to check " *
+            "whether its scalar parameters still trend; set sampler.final to at least " *
+            "$(4 * FINAL_TREND_BLOCKS) blocks of steps"
+        return String[]
+    end
+    names = first.(first(first(samples)))
+    all(s -> all(c -> first.(c) == names, s), samples) ||
+        error("the scalar parameters differ between the positions of the warmup's final phase")
+    halves = (1:(n ÷ 2), (n ÷ 2 + 1):n)
+    trends = Pair{String, Float64}[]
+    for (j, name) in pairs(names)
+        v = [last(samples[t][k][j]) for t in 1:n, k in 1:K]
+        shift = [mean(v[last(halves), k]) - mean(v[first(halves), k]) for k in 1:K]
+        spread = sqrt(mean(var(v[h, k]) for h in halves, k in 1:K))
+        spread > 0 && (all(>(0), shift) || all(<(0), shift)) || continue
+        z = abs(mean(shift)) / spread
+        z > threshold && push!(trends, name => z)
+    end
+    isempty(trends) && return String[]
+    sort!(trends; by = last, rev = true)
+    shown = join((@sprintf("%s %.1f", k, z) for (k, z) in first(trends, 10)), ", ")
+    @warn "$(length(trends)) scalar parameters still trend at the end of the warmup, in every " *
+        "chain the same way (shift between the halves of the final phase in within-half " *
+        "standard deviations): $shown$(length(trends) > 10 ? ", …" : ""); the first draws " *
+        "may not yet be from the typical set"
+    return first.(trends)
 end

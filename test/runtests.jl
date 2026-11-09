@@ -2,6 +2,7 @@ using BlackboxComrade
 using Test
 using TOML
 using Random
+using Serialization: deserialize
 using LinearAlgebra
 using Statistics: cov, mean
 using Distributions: LogNormal, Normal, cdf, logpdf, quantile
@@ -552,10 +553,38 @@ exconfig(f) = TOML.parsefile(joinpath(EXDIR, f))
         mc["sampler"]["chains"] = 2
         mc["sampler"]["max_step_halvings"] = 0
         @test (build_fitting_config(mc).chains, build_fitting_config(mc).max_step_halvings) == (2, 0)
+        @test build_fitting_config(mc).thin == 1
+        mc["sampler"]["thin"] = 10
+        @test build_fitting_config(mc).thin == 10
+        mc["sampler"]["thin"] = 0
+        @test_throws "sampler.thin must be at least 1, got 0" build_fitting_config(mc)
+        delete!(mc["sampler"], "thin")
         mc["sampler"]["chains"] = 0
         @test_throws "sampler.chains must be at least 1" build_fitting_config(mc)
         mc["sampler"]["chains"] = 2
         edited(c, section, edits...) = merge(c, Dict(section => merge(c[section], Dict(edits...))))
+        smc = build_fitting_config(mc)
+        @test smc.final == round(Int, 0.2 * smc.nadapt)
+        @test (smc.stiff_directions, smc.stiff_draws) == (8, 2)
+        @test (smc.trajectory_rows, smc.trajectory_quantile) == ("all", nothing)
+        @test (smc.refit_trajectory_step, smc.window_iterations) == (1.0, 1)
+        tuned = build_fitting_config(
+            edited(
+                mc, "sampler", "final" => 0, "stiff_directions" => 32, "stiff_draws" => 8,
+                "trajectory_rows" => "projections", "trajectory_quantile" => 0.9,
+                "refit_trajectory_step" => 0.5, "window_iterations" => 2
+            )
+        )
+        @test (tuned.final, tuned.stiff_directions, tuned.stiff_draws) == (0, 32, 8)
+        @test (tuned.trajectory_rows, tuned.trajectory_quantile) == ("projections", 0.9)
+        @test (tuned.refit_trajectory_step, tuned.window_iterations) == (0.5, 2)
+        @test_throws "sampler.final must be nonnegative, got -1" build_fitting_config(edited(mc, "sampler", "final" => -1))
+        @test_throws "sampler.stiff_directions must be at least 1, got 0" build_fitting_config(edited(mc, "sampler", "stiff_directions" => 0))
+        @test_throws "sampler.stiff_draws must be at least 1, got 0" build_fitting_config(edited(mc, "sampler", "stiff_draws" => 0))
+        @test_throws "sampler.trajectory_rows must be \"all\" or \"projections\", got \"coordinates\"" build_fitting_config(edited(mc, "sampler", "trajectory_rows" => "coordinates"))
+        @test_throws "sampler.trajectory_quantile must be in [0, 1], got 1.5" build_fitting_config(edited(mc, "sampler", "trajectory_quantile" => 1.5))
+        @test_throws "sampler.refit_trajectory_step must be in (0, 1], got 0.0" build_fitting_config(edited(mc, "sampler", "refit_trajectory_step" => 0.0))
+        @test_throws "sampler.window_iterations must be at least 1, got 0" build_fitting_config(edited(mc, "sampler", "window_iterations" => 0))
         @test_throws "sampler.max_tree_depth applies to sampler.algorithm = \"nuts\" or \"walnuts\" only" build_fitting_config(edited(mc, "sampler", "max_tree_depth" => 8))
         @test build_fitting_config(edited(mc, "run", "latent_space" => "flat")).latent_space == "flat"
         @test_throws "needs run.use_reactant = true" build_fitting_config(edited(mc, "run", "use_reactant" => false))
@@ -576,6 +605,7 @@ exconfig(f) = TOML.parsefile(joinpath(EXDIR, f))
         @test_throws "sampler.chunk_size must be at least 1" build_fitting_config(edited(wn, "sampler", "chunk_size" => 0))
         @test_throws "sampler.max_step_halvings applies to sampler.algorithm = \"mclmc\" only, not \"walnuts\"" build_fitting_config(edited(wn, "sampler", "max_step_halvings" => 2))
         @test_throws "sampler.step_size applies to sampler.algorithm = \"nuts\" or \"mclmc\" only, not \"walnuts\"" build_fitting_config(edited(wn, "sampler", "step_size" => 0.1))
+        @test_throws "sampler.thin applies to sampler.algorithm = \"mclmc\" only, not \"walnuts\"" build_fitting_config(edited(wn, "sampler", "thin" => 2))
         @test_throws "sampler.algorithm = \"walnuts\" needs run.use_reactant = true" build_fitting_config(edited(wn, "run", "use_reactant" => false))
         @test build_fitting_config(edited(wn, "run", "latent_space" => "flat")).latent_space == "flat"
         @test_throws "run.warmup_checkpoint apply to NUTS only" build_fitting_config(edited(wn, "run", "warmup_checkpoint" => 10))
@@ -706,6 +736,8 @@ exconfig(f) = TOML.parsefile(joinpath(EXDIR, f))
             (; logp = -2.0, num_grads = 4, time = 2.0, divergent = 0, halved = 1),
             (; logp = -4.0, num_grads = 4, time = 2.0, divergent = 2, halved = 1),
         ]
+        a, b = only(mdraws)[2]
+        @test BB.merge_draw_stats(a, b) == (; logp = -4.0, num_grads = 8, time = 4.0, divergent = 2, halved = 2)
 
         out = mktempdir()
         @test_throws "no chains (chain_1, chain_2, …)" BB.load_kinetic_chains(out)
@@ -724,6 +756,22 @@ exconfig(f) = TOML.parsefile(joinpath(EXDIR, f))
         BB.push_draw!(w, (; x = [3, 1]); logp = -1)
         BB.flush_draws!(w)
         @test_throws "different numbers of draws" BB.load_kinetic_chains(out)
+
+        wdir = joinpath(mktempdir(), "warmup")
+        r = BB.WarmupRecord(wdir, 2)
+        for b in 1:4
+            BB.record_block!(r, (; phase = :adaptation, block = b, steps = 100b), 1.5b, [-b, -10b])
+        end
+        BB.record_positions!(r, (; phase = :adaptation, block = 4, steps = 400), [-4.0, -40.0], [(; x = [1, 4]), (; x = [2, 4])])
+        @test_throws DimensionMismatch BB.record_block!(r, (; phase = :window, block = 5, steps = 100), 7.5, [-5.0])
+        tr = deserialize(BB.write_trace(r))
+        @test tr.block == 1:4 && tr.steps == 100:100:400 && tr.seconds == 1.5:1.5:6.0
+        @test all(==(:adaptation), tr.phase)
+        @test tr.logp == [-1 -2 -3 -4; -10 -20 -30 -40]
+        @test !isfile(joinpath(wdir, "trace.jls.tmp"))
+        snap = BB.load_kinetic_chains(wdir)
+        @test Comrade.postsamples(snap)[1, 2].x == [2, 4]
+        @test Comrade.samplerstats(snap)[1, 2] == (; logp = -40.0, phase = :adaptation, block = 4, steps = 400)
     end
 
     @testset "sky config + grid snapping" begin
