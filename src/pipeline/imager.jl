@@ -433,7 +433,7 @@ function comrade_imager(
     tgrad = strategy.benchmark ? _run_benchmarks(post, strategy, latent_space(strategy)) : nothing
 
     g = post.skymodel.grid.imgdomain
-    gimg = refinespatial(g, 2)
+    gimg = refine_pixels(g, 2)
     opt = _select_optimizer(strategy)
 
     # ---- optimization / start / restart ----------------------------------------------

@@ -101,6 +101,59 @@ exconfig(f) = TOML.parsefile(joinpath(EXDIR, f))
         @test_throws ErrorException assemble_instrument(cfg)
     end
 
+    @testset "leakage_disk_offsets_retarder" begin
+        @test BlackboxComrade.required_params(BlackboxComrade.LEAKAGE_SCHEMES["leakage_disk_offsets_retarder"]) ==
+            (:d1reμ, :d1imμ, :d2reμ, :d2imμ, :d1re, :d1im, :d2re, :d2im, :qwpδ, :qwpε)
+        W(δ, ε) = (w = BlackboxComrade.retarder_jones(δ, ε); [w[1] w[3]; w[2] w[4]])
+        @test W(0.0, 0.0) ≈ [1 0; 0 1]
+        # Independent construction: linear feeds behind a retarder with fast axis at θ and
+        # retardance r, in the circular basis, relative to the ideal plate (θ = π/4, r = π/2),
+        # up to the common phase e^{iε/2} that a feed-1 gain absorbs.
+        rot(t) = [cos(t) sin(t); -sin(t) cos(t)]
+        plate(θ, r) = rot(-θ) * [1 0; 0 cis(r)] * rot(θ)
+        C = [1 1; -im im] / sqrt(2)
+        J0 = plate(π / 4, π / 2) * C
+        for (δ, ε) in ((0.17, 0.0), (0.0, 0.2), (-0.35, 0.12), (0.6, -0.3))
+            Wd = W(δ, ε)
+            @test Wd ≈ cis(-ε / 2) * (J0 \ (plate(π / 4 + δ, π / 2 + ε) * C))
+            @test det(Wd) ≈ 1
+            D1, D2 = Wd[1, 2] / Wd[1, 1], Wd[2, 1] / Wd[2, 2]
+            @test D2 ≈ -conj(D1)
+            ε == 0 && @test abs(D1) ≈ tan(abs(δ))
+        end
+
+        # qwpδ = qwpε = 0 is leakage_disk_offsets exactly
+        x = (d1reμ = 0.1, d1imμ = -0.05, d2reμ = 0.02, d2imμ = 0.0, d1re = 0.01, d1im = 0.0, d2re = -0.02, d2im = 0.03)
+        d1, d2 = BlackboxComrade._leakage_disk_offsets_pmap_1(x)
+        j = BlackboxComrade._leakage_disk_offsets_retarder_pmap_1(merge(x, (qwpδ = 0.0, qwpε = 0.0)))
+        @test collect(j) ≈ [1, d2, d1, 1]
+        # otherwise D·W
+        j = BlackboxComrade._leakage_disk_offsets_retarder_pmap_1(merge(x, (qwpδ = 0.3, qwpε = -0.1)))
+        @test [j[1] j[3]; j[2] j[4]] ≈ [1 d1; d2 1] * W(0.3, -0.1)
+
+        # the plate terms pinned at 0 except at one station
+        cfg = exconfig("instrument_mixed.toml")
+        cfg["leakage"]["scheme"] = "leakage_disk_offsets_retarder"
+        for n in ("d1re", "d1im", "d2re", "d2im")
+            cfg["priors"][n * "μ"] = cfg["priors"][n]
+        end
+        site = "LM"
+        for n in ("qwpδ", "qwpε")
+            cfg["priors"][n] = Dict{String, Any}(
+                "seg" => "track", "dist" => Dict{String, Any}("dist" => "Normal", "args" => [0.0, 1.0]),
+                "init" => Dict{String, Any}("kind" => "fixed", "value" => 0.0),
+                "overrides" => Dict{String, Any}(
+                    site => Dict{String, Any}(
+                        "seg" => "track", "dist" => Dict{String, Any}("dist" => "Normal", "args" => [0.0, 0.5])
+                    ),
+                ),
+            )
+        end
+        intm = assemble_instrument(cfg)
+        @test intm isa InstrumentModel
+        @test all(n -> haskey(intm.prior, n), (:qwpδ, :qwpε))
+    end
+
     @testset "instrument assembler" begin
         intm = build_instrument_config(exconfig("instrument_mixed.toml"))
         @test intm isa InstrumentModel
@@ -124,6 +177,8 @@ exconfig(f) = TOML.parsefile(joinpath(EXDIR, f))
         intm = assemble_instrument(cfg)
         @test intm isa InstrumentModel && intm.selfcal
         @test !haskey(intm.prior, :gp1)
+        @test BlackboxComrade.required_params(BlackboxComrade.GAIN_SCHEMES["gain_selfcal_offsets"]) ==
+            (:lg1μ, :lg1, :lgratμ, :lgrat, :gpratμ, :gprat)
     end
 
     @testset "iid first-stamp pin (init)" begin
@@ -695,6 +750,20 @@ exconfig(f) = TOML.parsefile(joinpath(EXDIR, f))
         @test (nx == 63) && (ny == 63)
         # GMRF order 1 snaps to a product of small primes
         @test BlackboxComrade.snap_grid_size(GMRF, 1, 23, 23) == (24, 24)
+    end
+
+    @testset "refine_pixels splits each pixel exactly" begin
+        g = imagepixels(μas2rad(9600.0), μas2rad(5400.0), 320, 180, μas2rad(3200.0), -μas2rad(1200.0))
+        r = BlackboxComrade.refine_pixels(g, 2)
+        @test size(r) == (640, 360)
+        @test step(r.X) ≈ step(g.X) / 2
+        @test step(r.Y) ≈ step(g.Y) / 2
+        @test step(r.X) ≈ step(r.Y)
+        # same field: the outer pixel edges do not move
+        @test first(r.X) - step(r.X) / 2 ≈ first(g.X) - step(g.X) / 2
+        @test last(r.Y) + step(r.Y) / 2 ≈ last(g.Y) + step(g.Y) / 2
+        @test BlackboxComrade.refine_pixels(g, 1).X ≈ g.X
+        @test_throws "refinement factor must be at least 1" BlackboxComrade.refine_pixels(g, 0)
     end
 
     @testset "Gaussian background mean with a fixed FWHM" begin

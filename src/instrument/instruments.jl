@@ -256,6 +256,27 @@ end
     end
 end
 
+#     gain_selfcal_offsets(; priors)
+#
+# `gain_selfcal` with the feed-1 amplitude split as in `gain_offsets`: lg1μ (per-track
+# constant log-amplitude, one value per site) + lg1 (a zero-mean stationary chain about it).
+# lg1μ holds each site's a-priori calibration offset, so a large constant offset is not forced
+# onto lg1's fitted σ. A common shift of every site's lg1μ trades exactly against the total
+# flux, so the lg1μ prior width sets the flux uncertainty.
+@instrument selfcal = true function gain_selfcal_offsets(; priors)
+    return @jones begin
+        lg1μ ~ priors.lg1μ     # amplitude: per-station constant log-amplitude (track)
+        lg1 ~ priors.lg1       # amplitude: zero-mean stationary chain about it
+        lgratμ ~ priors.lgratμ # ratio amplitude: per-station mean (OU cannot fit its own)
+        lgrat ~ priors.lgrat   # ratio amplitude: residual about that mean
+        gpratμ ~ priors.gpratμ # ratio phase: per-station WRAPPED offset (arbitrary, on circle)
+        gprat ~ priors.gprat   # ratio phase: mean-reverting circular drift about it
+        g1 = complex(exp(lg1μ + lg1))
+        g2 = g1 * exp(complex((lgratμ + lgrat), (gpratμ + gprat)))
+        return JonesG((g1, g2))
+    end
+end
+
 #     gain_offsets(; priors)
 #
 # `gain_offsetphase` with the feed-1 amplitude split the same way as its phase:
@@ -389,6 +410,55 @@ unitdisk(z) = z / sqrt(1 + abs2(z))
     end
 end
 
+"""
+    retarder_jones(δ, ε) -> (w11, w21, w12, w22)
+
+Jones matrix, in column-major order, of a retarder that converts linear feeds to circular:
+fast axis rotated by `δ` (radians) from its nominal 45° and retardance `π/2 + ε`. It is written
+in the circular basis and normalized so that it is the identity at `δ = ε = 0`:
+
+    W = [  cos(ε/2) - i a s e^{-iδ}    sin(ε/2) + i a s e^{iδ}
+          -sin(ε/2) + i a s e^{-iδ}    cos(ε/2) + i a s e^{iδ}  ]
+
+with `a = cos(ε/2) + sin(ε/2)` and `s = sin δ`; `det W = 1`. Its leakage `W₁₂/W₁₁`,
+`W₂₁/W₂₂` satisfies `D₂ = -conj(D₁)`, the two feeds staying orthogonal, and `|D| = tan δ` at
+`ε = 0`.
+"""
+function retarder_jones(δ, ε)
+    c, se = cos(ε / 2), sin(ε / 2)
+    as = (c + se) * sin(δ)
+    u = complex(as * sin(δ), as * cos(δ))     # i a s e^{-iδ}
+    v = complex(-as * sin(δ), as * cos(δ))    # i a s e^{iδ}
+    return (c - u, -se + u, se + v, c + v)
+end
+
+#     leakage_disk_offsets_retarder(; priors)
+#
+# `leakage_disk_offsets` times a retarder (`retarder_jones`): the station's leakage Jones
+# matrix is D·W, with D = [1 d1; d2 1] the `leakage_disk_offsets` leakage and W the retarder
+# rotated by `qwpδ` (radians) with retardance π/2 + `qwpε`. It describes a station whose
+# circular feeds are linear feeds behind a misaligned quarter-wave plate, with its other
+# leakage in D. qwpδ = qwpε = 0 gives `leakage_disk_offsets` exactly, so stations without a
+# plate pin both to 0.
+@instrument function leakage_disk_offsets_retarder(; priors)
+    return @jones begin
+        d1reμ ~ priors.d1reμ
+        d1imμ ~ priors.d1imμ
+        d2reμ ~ priors.d2reμ
+        d2imμ ~ priors.d2imμ
+        d1re ~ priors.d1re
+        d1im ~ priors.d1im
+        d2re ~ priors.d2re
+        d2im ~ priors.d2im
+        qwpδ ~ priors.qwpδ
+        qwpε ~ priors.qwpε
+        d1 = unitdisk(complex(d1reμ + d1re, d1imμ + d1im))
+        d2 = unitdisk(complex(d2reμ + d2re, d2imμ + d2im))
+        w11, w21, w12, w22 = retarder_jones(qwpδ, qwpε)
+        return GenericJones((w11 + d1 * w21, d2 * w11 + w21, w12 + d1 * w22, d2 * w12 + w22))
+    end
+end
+
 #     leakage_hier(; priors)
 #
 # Hierarchical leakage: each feed's real/imaginary parts are given by a mean, a standard
@@ -425,6 +495,7 @@ const GAIN_SCHEMES = Dict{String, Any}(
     "gain_offsetphase" => gain_offsetphase,
     "gain_offsets" => gain_offsets,
     "gain_selfcal" => gain_selfcal,
+    "gain_selfcal_offsets" => gain_selfcal_offsets,
     "gain_centered" => gain_centered,
     "gain_hier" => gain_hier,
     "gain_noratio" => gain_noratio,
@@ -437,6 +508,7 @@ const LEAKAGE_SCHEMES = Dict{String, Any}(
     "leakage_hier" => leakage_hier,
     "leakage_disk" => leakage_disk,
     "leakage_disk_offsets" => leakage_disk_offsets,
+    "leakage_disk_offsets_retarder" => leakage_disk_offsets_retarder,
 )
 
 const SEGMENTATIONS = Dict{String, Any}(
