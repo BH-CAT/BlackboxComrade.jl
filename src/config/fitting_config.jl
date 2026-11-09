@@ -3,6 +3,20 @@
 
 const KINETIC_ALGORITHMS = ("mclmc", "walnuts")
 const KINETIC_WARMUP = Dict("mclmc" => 150_000, "walnuts" => 1_000)
+const MCLMC_INTEGRATORS = ("mclachlan", "leapfrog", "baoab")
+
+function _mclmc_integrator_name(name)
+    name in MCLMC_INTEGRATORS || error(
+        "sampler.integrator must be one of $(join(repr.(MCLMC_INTEGRATORS), ", ")), got $(repr(name))"
+    )
+    return String(name)
+end
+
+function _positive_or_nothing(x, key)
+    isnothing(x) && return nothing
+    x isa Real && x > 0 || error("$key must be a positive number, got $(repr(x))")
+    return Float64(x)
+end
 const MOVE_KINDS = ("flux_gain", "field_scale", "rho_field", "mean_field", "phase_sheet", "chain_hyper")
 
 """
@@ -46,7 +60,8 @@ Base.@kwdef struct FittingStrategy
     noise_schedule::Vector{Float64} = [0.05, 0.025, 0.0]
     nsample::Int = 10_000
     nadapt::Int = 5_000
-    step_size::Float64 = 0.01
+    # NUTS's initial step size; for MCLMC the sampling step size, `nothing` keeping the warmup's.
+    step_size::Union{Nothing, Float64} = 0.01
     target_accept::Float64 = 0.9
     init_buffer::Int = 200
     term_buffer::Int = 500
@@ -57,6 +72,18 @@ Base.@kwdef struct FittingStrategy
     algorithm::String = "nuts"
     chains::Int = 4
     max_step_halvings::Int = 3
+    # MCLMC's integrator: "mclachlan", "leapfrog" or "baoab".
+    integrator::String = "mclachlan"
+    # MCLMC halves a step whose energy error exceeds this, in total; `nothing` keeps
+    # KineticSamplers' default of 0.25 √d.
+    max_energy_error::Union{Nothing, Float64} = nothing
+    # The phase per step at the median curvature of the MCLMC warmup's step-size cap; `nothing`
+    # is `MCLACHLAN_CAP_PHASE` for McLachlan (see `mclmc_cap_phase`).
+    max_mode_phase::Union{Nothing, Float64} = nothing
+    # MCLMC's trajectory length in units of √d; `nothing` sets it from the warmup's window.
+    trajectory_length::Union{Nothing, Float64} = nothing
+    # MCLMC samples at the step size of `KineticSamplers.tune_step_size` after the warmup.
+    bias_tuning::Bool = true
     # Metropolis–Hastings moves run between sampler chunks or blocks (see `build_moves`).
     moves::Vector{MoveSpec} = MoveSpec[]
     # run
@@ -96,10 +123,21 @@ Parse a fitting-strategy TOML into a [`FittingStrategy`](@ref). Sections: `[opti
 (see [`sample_kinetic`](@ref)) and need `run.use_reactant = true`. `nadapt` is the warmup length per chain, in steps for
 MCLMC (default 150 000) and in draws for WALNUTS (default 1000), and `nsample` the draws kept
 per chain (default 1000). For MCLMC a draw is kept every `chunk_size` steps, and `max_step_halvings` (default 3) is the number of halvings
-of a step whose energy error is too large. For WALNUTS every draw is kept, `chunk_size`
+of a step whose energy error is too large: above `max_energy_error` in total (default 0.25 √d,
+KineticSamplers' default). `integrator` is MCLMC's integrator: `"mclachlan"` (default),
+`"leapfrog"` or `"baoab"` (see `KineticSamplers.BAOAB`). `max_mode_phase` is the phase per step
+at the median curvature of the MCLMC warmup's step-size cap (default 0.7 with McLachlan; it must
+be set with the other integrators; see [`sample_kinetic`](@ref)). `trajectory_length`, in units of √d, fixes MCLMC's trajectory
+length, and the warmup then runs no window; left out, the window sets it. `step_size` fixes
+MCLMC's sampling step size; left out, the warmup's adapted step size is used. `bias_tuning`
+(default true unless `step_size` is set) reduces the warmup's MCLMC step size until a coupled
+bias check passes (see [`sample_kinetic`](@ref)); `bias_tuning = true` is an error with
+`step_size`. After sampling, the run logs and writes the autocorrelation times of the scalar
+parameters in units of the trajectory length (see [`trajectory_report`](@ref)). For
+WALNUTS every draw is kept, `chunk_size`
 (default 10) is the draws per sampling block, which must divide `nsample`, and `max_tree_depth`
-(default 10) is the most trajectory doublings. `step_size` and the run checkpoints are
-errors with either algorithm, as is `max_tree_depth` with MCLMC. `run.start` may also name the
+(default 10) is the most trajectory doublings. `step_size` is an error with WALNUTS, the run
+checkpoints are errors with either algorithm, and `max_tree_depth` is an error with MCLMC. `run.start` may also name the
 run base of an MCLMC or WALNUTS run (the directory holding its `chain_k`), whose chains' last
 draws start the chains one to one.
 
@@ -183,7 +221,8 @@ function build_fitting_config(cfg::AbstractDict)
         (
             "nsample", "nadapt", "step_size", "target_accept", "init_buffer",
             "term_buffer", "max_tree_depth", "chunk_size", "moves", "moves_per_chunk",
-            "algorithm", "chains", "max_step_halvings",
+            "algorithm", "chains", "max_step_halvings", "integrator", "max_energy_error",
+            "max_mode_phase", "trajectory_length", "bias_tuning",
         ),
         "[sampler]"
     )
@@ -237,8 +276,11 @@ function build_fitting_config(cfg::AbstractDict)
     )
     kinetic = algorithm in KINETIC_ALGORITHMS
     for (key, allowed) in (
-            "step_size" => ("nuts",), "max_tree_depth" => ("nuts", "walnuts"),
+            "step_size" => ("nuts", "mclmc"), "max_tree_depth" => ("nuts", "walnuts"),
             "chains" => KINETIC_ALGORITHMS, "max_step_halvings" => ("mclmc",),
+            "integrator" => ("mclmc",), "max_energy_error" => ("mclmc",),
+            "max_mode_phase" => ("mclmc",),
+            "trajectory_length" => ("mclmc",), "bias_tuning" => ("mclmc",),
         )
         haskey(samp, key) && !(algorithm in allowed) && error(
             "sampler.$key applies to sampler.algorithm = $(join(repr.(allowed), " or ")) only, " *
@@ -262,6 +304,15 @@ function build_fitting_config(cfg::AbstractDict)
         "sampler.nsample = $nsample must be a multiple of sampler.chunk_size = $chunk_size, " *
             "the WALNUTS draws per block"
     )
+    integrator = _mclmc_integrator_name(get(samp, "integrator", "mclachlan"))
+    algorithm == "mclmc" && integrator != "mclachlan" && !haskey(samp, "max_mode_phase") && error(
+        "sampler.max_mode_phase must be set with sampler.integrator = $(repr(integrator)): " *
+            "the default phase of the MCLMC step-size cap applies to \"mclachlan\""
+    )
+    bias_tuning = Bool(get(samp, "bias_tuning", !haskey(samp, "step_size")))
+    bias_tuning && haskey(samp, "step_size") && error(
+        "sampler.step_size and sampler.bias_tuning = true both set the MCLMC step size; set one"
+    )
     return FittingStrategy(;
         opt_method = opt_method,
         maxiters = Int(get(opt, "maxiters", 10_000)),
@@ -272,7 +323,9 @@ function build_fitting_config(cfg::AbstractDict)
         noise_schedule = Float64.(get(temp, "noise_schedule", [0.05, 0.025, 0.0])),
         nsample,
         nadapt = Int(get(samp, "nadapt", get(KINETIC_WARMUP, algorithm, 5_000))),
-        step_size = Float64(get(samp, "step_size", 0.01)),
+        step_size = algorithm == "mclmc" ?
+            _positive_or_nothing(get(samp, "step_size", nothing), "sampler.step_size") :
+            Float64(get(samp, "step_size", 0.01)),
         target_accept = Float64(get(samp, "target_accept", 0.9)),
         init_buffer = Int(get(samp, "init_buffer", 200)),
         term_buffer = Int(get(samp, "term_buffer", 500)),
@@ -282,6 +335,17 @@ function build_fitting_config(cfg::AbstractDict)
         algorithm,
         chains,
         max_step_halvings = Int(get(samp, "max_step_halvings", 3)),
+        integrator,
+        max_energy_error = _positive_or_nothing(
+            get(samp, "max_energy_error", nothing), "sampler.max_energy_error"
+        ),
+        max_mode_phase = _positive_or_nothing(
+            get(samp, "max_mode_phase", nothing), "sampler.max_mode_phase"
+        ),
+        trajectory_length = _positive_or_nothing(
+            get(samp, "trajectory_length", nothing), "sampler.trajectory_length"
+        ),
+        bias_tuning,
         latent_space = latent_space,
         use_reactant = use_reactant,
         device,

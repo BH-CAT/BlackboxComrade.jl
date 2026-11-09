@@ -381,9 +381,10 @@ save the optimal image + caltables, then sample the posterior (AdvancedHMC NUTS,
 NUTS, MCLMC or WALNUTS per `strategy`) and write posterior FITS draws. Returns the path the
 run was written to.
 
-`restart=true` loads the serialized optimum at `outbase` instead of re-optimizing. Sampling
-resumes from the checkpoint at `outbase` when one was started (it holds `transport.jls`, the
-latent space it runs in) and otherwise starts fresh from the optimum. It is a one-off run action
+`restart=true` loads the serialized optimum at `outbase` instead of re-optimizing. NUTS
+sampling resumes from the checkpoint at `outbase` when one was started (it holds
+`transport.jls`, the latent space it runs in) and otherwise starts fresh from the optimum;
+MCLMC sampling continues from its chains' last draws (see [`sample_kinetic`](@ref)). It is a one-off run action
 (not part of `strategy`).
 """
 function comrade_imager(
@@ -440,7 +441,7 @@ function comrade_imager(
     starts = nothing
     if restart
         @info "Restarting from $(out)_optimum_allres.jls" *
-            (resume ? "" : "; no sampler checkpoint at $out, so sampling starts fresh")
+            (resume || strategy.algorithm in KINETIC_ALGORITHMS ? "" : "; no sampler checkpoint at $out, so sampling starts fresh")
         xopt = deserialize(out * "_optimum_allres.jls")[:xopt]
     elseif !isnothing(strategy.start)
         loaded = _load_start(strategy.start)
@@ -475,7 +476,7 @@ function comrade_imager(
     end
     foreach(x -> check_start(post, latent_space(strategy), x), something(starts, [xopt]))
     chain = if strategy.algorithm in KINETIC_ALGORITHMS
-        sample_kinetic(out, post, xopt, strategy, rng; starts)
+        sample_kinetic(out, post, xopt, strategy, rng; starts, resume = restart)
     elseif strategy.use_reactant
         load_samples(_sample_reactant(out, post, xopt, strategy, resume, gimg, imgbase, transport_method, tgrad)...)
     else

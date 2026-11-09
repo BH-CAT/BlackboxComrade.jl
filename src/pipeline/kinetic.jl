@@ -4,9 +4,16 @@ const KINETIC_START_JITTER = 0.001
 const KINETIC_DRAWS_PER_FILE = 10
 const KINETIC_RETURNED_DRAWS = 500
 const KINETIC_LOG_DRAWS = 50
+const KINETIC_READ_DRAWS = 200
 const MCLMC_MOVE_BLOCKS = 50
 const WALNUTS_MOVE_BLOCKS = 10
 const MCLMC_CHECK_BLOCKS = 10
+const SCALAR_BLOCK = 8
+const TRAJECTORY_REPORTED = 5
+const CAP_QUANTILE = 0.5
+const MCLACHLAN_CAP_PHASE = 0.7
+const BIAS_ESS = 100
+const BIAS_CHECK = KineticSamplers.BiasCheck(; ess = BIAS_ESS)
 
 """
     LatentTarget(tpost, dim)
@@ -51,17 +58,39 @@ end
 collect_device_garbage(block) = block % 50 == 0 ? GC.gc() : (block % 5 == 0 && GC.gc(false))
 
 """
-    sample_kinetic(out, post, xopt, strategy, rng; starts=nothing) -> Comrade.PosteriorSamples
+    sample_kinetic(out, post, xopt, strategy, rng; starts=nothing, resume=false) -> Comrade.PosteriorSamples
 
 `strategy.chains` chains of the KineticSamplers algorithm `strategy.algorithm` (MCLMC or
 WALNUTS) on `post` in the latent space of `strategy.latent_space`, compiled with Reactant, started at `xopt`
 jittered by `$(KINETIC_START_JITTER)` standard normals per latent coordinate, or chain `k` at
 `starts[k]` when `starts` is given. A `PooledAdaptation` of `strategy.nadapt` MCLMC steps or
 WALNUTS draws per chain, in blocks of `strategy.chunk_size` MCLMC steps or of KineticSamplers'
-default length for WALNUTS, adapts one step size and one low-rank inverse mass with stiff directions for all chains; MCLMC warms up without step
-halving. Its history and parameters go to `out/mclmc_warmup.jls` or `out/walnuts_warmup.jls`.
-For MCLMC, $(MCLMC_CHECK_BLOCKS) blocks at the sampling parameters, whose energy statistics are
-logged per chain, must then pass `KineticSamplers.check_energy`.
+default length for WALNUTS, adapts one step size and one low-rank inverse mass with stiff
+directions for all chains. The MCLMC step size follows its energy error and, once the inverse
+mass is final, is capped at the step size for which a harmonic mode of the median whitened
+curvature at positions of the warmup's records advances by the phase
+[`mclmc_cap_phase`](@ref) per step (`curvature_quantile = $(CAP_QUANTILE)`). MCLMC warms up
+without step halving,
+except with `integrator = "baoab"`, whose warmup halves steps as its sampling does. Its history
+and parameters go to `out/mclmc_warmup.jls` or `out/walnuts_warmup.jls`. With
+`strategy.trajectory_length`, the MCLMC warmup runs no window and the trajectory length is
+`strategy.trajectory_length` times √d, and with `strategy.step_size` MCLMC samples at that step
+size instead of the warmup's. After the MCLMC warmup, `KineticSamplers.measure_bias` estimates
+the bias of the sampling parameters from coupled runs of $(BIAS_CHECK.steps) steps with one
+and two substeps. Its tolerances are the Monte Carlo errors at an effective sample size of
+$(BIAS_ESS): $(round(BIAS_CHECK.max_mean_bias; sigdigits = 3)) standard deviations in a mean
+and $(round(BIAS_CHECK.max_variance_bias; sigdigits = 3)) of a variance. With
+`strategy.bias_tuning`, `KineticSamplers.tune_step_size` reduces the step size until the
+estimates are within them, logging each round, and the warmup file holds the reduced step size.
+Without it the estimate is logged, with a warning if it exceeds them, and sampling continues at
+the warmup's step size. Then $(MCLMC_CHECK_BLOCKS) blocks at the sampling parameters
+follow, whose energy statistics are logged per chain; if they fail
+`KineticSamplers.check_energy`, a warning says so and sampling continues.
+
+With `resume`, MCLMC sampling whose warmup finished (`out/mclmc_warmup.jls`) and which wrote
+draws continues instead: no warmup, the parameters of that file, each chain from its last draw,
+appending draws until `strategy.nsample`, without the bias check or tuning; the trajectory report then
+covers all draws. Without draws it starts afresh.
 
 Sampling keeps `strategy.nsample` draws per chain, chain `k` written as a Comrade sample
 directory `out/chain_k`: the last position of each block for MCLMC, every draw for WALNUTS
@@ -70,13 +99,15 @@ during the warmup's adaptation phase and sampling, every $(MCLMC_MOVE_BLOCKS) bl
 and every $(WALNUTS_MOVE_BLOCKS) blocks for WALNUTS; a chain that moved restarts at its new position. Returns about
 $(KINETIC_RETURNED_DRAWS) draws, evenly thinned from each chain, as a draws × chains
 `PosteriorSamples`; the chains on disk keep every draw (see [`load_kinetic_chains`](@ref)).
+After MCLMC sampling, [`trajectory_report`](@ref) logs the autocorrelation times of the scalar
+parameters and writes them to `out/trajectory_report.toml`.
 """
-function sample_kinetic(out, post, xopt, strategy::FittingStrategy, rng; starts = nothing)
+function sample_kinetic(out, post, xopt, strategy::FittingStrategy, rng; starts = nothing, resume = false)
     K = strategy.chains
     chain_dirs = [joinpath(out, "chain_$k") for k in 1:K]
     existing = filter(ispath, chain_dirs)
-    isempty(existing) || error(
-        "$(first(existing)) exists; $(strategy.algorithm) sampling does not resume, so move the earlier chains away"
+    resume || isempty(existing) || error(
+        "$(first(existing)) exists; restart the run to continue its sampling, or move the earlier chains away"
     )
     post_cpu = @set post.admode = nothing
     space = latent_space(strategy)
@@ -86,8 +117,15 @@ function sample_kinetic(out, post, xopt, strategy::FittingStrategy, rng; starts 
     tb = Comrade.CoordinateView(post_cpu, space).tbase
     d = dimension(tb)
     target = KineticSamplers.Target(LatentTarget(tpost, d); backend = ADTypes.AutoReactant())
-    alg, warmup_alg = kinetic_samplers(strategy)
+    alg, warmup_alg = kinetic_samplers(strategy, d)
     name = String(nameof(typeof(alg)))
+    warmup_file = joinpath(out, "$(lowercase(name))_warmup.jls")
+    done = resume ? _written_draws(chain_dirs) : 0
+    done > 0 && !isfile(warmup_file) &&
+        error("$out holds $done draws per chain but no $(basename(warmup_file)); sampling cannot resume")
+    done > 0 && alg isa KineticSamplers.WALNUTS && error("resuming WALNUTS sampling is not supported")
+    done > strategy.nsample &&
+        error("$out holds $done draws per chain, more than sampler.nsample = $(strategy.nsample)")
     nadapt, block = strategy.nadapt, strategy.chunk_size
     layout = block_layout(alg, block)
     strategy.nsample % layout.draws == 0 || error(
@@ -98,9 +136,14 @@ function sample_kinetic(out, post, xopt, strategy::FittingStrategy, rng; starts 
         max_rank = 100, max_wide = 80, stiff = KineticSamplers.StiffDirections(),
         vecs_eltype = Float32
     )
-    adapt = KineticSamplers.PooledAdaptation(
-        nadapt; mass, block = alg isa KineticSamplers.WALNUTS ? nothing : block
-    )
+    adapt = if alg isa KineticSamplers.WALNUTS
+        KineticSamplers.PooledAdaptation(nadapt; mass)
+    else
+        KineticSamplers.PooledAdaptation(
+            nadapt; mass, block, window = isnothing(strategy.trajectory_length) ? nothing : 0,
+            curvature_quantile = CAP_QUANTILE, max_mode_phase = mclmc_cap_phase(alg, strategy),
+        )
+    end
     warmup_block = KineticSamplers.block_length(adapt, warmup_alg)
     Θ = if isnothing(starts)
         Comrade.inverse(tb, xopt) .+ KINETIC_START_JITTER .* randn(rng, d, K)
@@ -111,6 +154,7 @@ function sample_kinetic(out, post, xopt, strategy::FittingStrategy, rng; starts 
     end
     host_rngs(n) = [Random.Xoshiro(rand(rng, UInt64)) for _ in 1:n]
     restart_rngs = host_rngs(K)
+    rngs = KineticSamplers.backend_rngs(ADTypes.AutoReactant(), host_rngs(K))
 
     moves = isempty(strategy.moves) ? nothing : build_moves(
             post_cpu, strategy.moves, xopt; space, output = joinpath(mkpath(out), "moves.jls")
@@ -133,37 +177,73 @@ function sample_kinetic(out, post, xopt, strategy::FittingStrategy, rng; starts 
         )
     end
 
-    @info "$name: $K chains on $d latent coordinates, warmup $nadapt $(layout.unit) per chain in " *
-        "blocks of $warmup_block, $(strategy.nsample) draws per chain; $(repr(alg))"
-    t0 = time()
-    function between_blocks(chains, info)
-        collect_device_garbage(info.block)
-        if !isnothing(moves) && info.phase === :adaptation && info.block % layout.move_blocks == 0
-            chains = move_chains(chains, :warmup, info.steps, nadapt)
-        end
-        info.block % log_blocks == 0 && @info @sprintf(
-            "%s warmup, %s block %d: %d %s per chain (%.0f s)",
-            name, info.phase, info.block, info.steps, layout.unit, time() - t0
+    if done > 0
+        host_params = deserialize(warmup_file).params
+        m = host_params.inverse_mass
+        length(m.stds) == d ||
+            error("$(basename(warmup_file)) has $(length(m.stds)) latent coordinates, the posterior $d")
+        params = KineticSamplers.IsokineticParameters(
+            host_params.step_size, host_params.trajectory_length,
+            KineticSamplers.LowRankInverseMass(m.stds, m.vecs, m.vals)
         )
-        _flush_logs()
-        return chains
+        chains = KineticSamplers.init_chains(
+            restart_rngs, target, alg, reduce(hcat, [Comrade.inverse(tb, s) for s in _last_draws(out)])
+        )
+        @info @sprintf(
+            "%s sampling resumes after draw %d of %d per chain, at step size %.4g and trajectory length %.4g from %s",
+            name, done, strategy.nsample, host_params.step_size, host_params.trajectory_length, warmup_file
+        )
+    else
+        @info "$name: $K chains on $d latent coordinates, warmup $nadapt $(layout.unit) per chain in " *
+            "blocks of $warmup_block, $(strategy.nsample) draws per chain; $(repr(alg))"
+        t0 = time()
+        function between_blocks(chains, info)
+            collect_device_garbage(info.block)
+            if !isnothing(moves) && info.phase === :adaptation && info.block % layout.move_blocks == 0
+                chains = move_chains(chains, :warmup, info.steps, nadapt)
+            end
+            info.block % log_blocks == 0 && @info @sprintf(
+                "%s warmup, %s block %d: %d %s per chain (%.0f s)",
+                name, info.phase, info.block, info.steps, layout.unit, time() - t0
+            )
+            _flush_logs()
+            return chains
+        end
+        chains, params, history = KineticSamplers.warmup(
+            host_rngs(K), target, adapt, warmup_alg, Θ; between_blocks, check = false
+        )
+        if alg isa KineticSamplers.MCLMC
+            h = something(strategy.step_size, params.step_size)
+            L = isnothing(strategy.trajectory_length) ? params.trajectory_length :
+                strategy.trajectory_length * sqrt(d)
+            isnothing(strategy.step_size) || @info @sprintf(
+                "MCLMC step size %.4g from sampler.step_size (warmup: %.4g)", h, params.step_size
+            )
+            isnothing(strategy.trajectory_length) ||
+                @info "MCLMC trajectory length $(strategy.trajectory_length) √d from sampler.trajectory_length"
+            params = KineticSamplers.IsokineticParameters(h, L, params.inverse_mass)
+        end
+        _log_warmup(alg, params, history, d, time() - t0)
+        if alg isa KineticSamplers.MCLMC && strategy.bias_tuning
+            params, chains = _tune_step_size(rngs, target, alg, params, chains, d)
+        end
+        host_params = _host_params(params)
+        serialize(warmup_file, (; history, params = host_params))
     end
-    chains, params, history = KineticSamplers.warmup(
-        host_rngs(K), target, adapt, warmup_alg, Θ; between_blocks, check = false
-    )
-    _log_warmup(alg, params, history, d, time() - t0)
-    serialize(
-        joinpath(out, "$(lowercase(name))_warmup.jls"), (; history, params = _host_params(params))
-    )
 
     params = Reactant.to_rarray(params; track_numbers = Number)
-    rngs = KineticSamplers.backend_rngs(ADTypes.AutoReactant(), host_rngs(K))
+    if alg isa KineticSamplers.MCLMC && done == 0 && !strategy.bias_tuning
+        chains = _bias_diagnostic(rngs, target, alg, params, chains, d)
+    end
     chains, trace = check_chains(target, rngs, alg, params, chains, block, d)
     writers = [ChainDrawWriter(dir) for dir in chain_dirs]
+    scalars = [Vector{Float64}[] for _ in 1:K]
+    scalar_names = String[]
+    alg isa KineticSamplers.MCLMC && _read_scalars!(scalars, scalar_names, chain_dirs, done)
     health = nothing
     nblocks = strategy.nsample ÷ layout.draws
     t0 = time()
-    for b in 1:nblocks
+    for b in (done ÷ layout.draws + 1):nblocks
         tb0 = time()
         chains, trace = KineticSamplers.run_block(
             rngs, target, alg, params, chains, trace, block, layout.recorder
@@ -171,7 +251,11 @@ function sample_kinetic(out, post, xopt, strategy::FittingStrategy, rng; starts 
         draws = block_draws(alg, chains, trace, time() - tb0)
         for (Θh, stats) in draws
             for (k, w) in pairs(writers)
-                push_draw!(w, Comrade.transform(tb, Θh[:, k]); stats[k]...)
+                θ = Comrade.transform(tb, Θh[:, k])
+                push_draw!(w, θ; stats[k]...)
+                leaves = scalar_leaves(θ)
+                isempty(scalar_names) && append!(scalar_names, first.(leaves))
+                push!(scalars[k], last.(leaves))
             end
             counts = [draw_health(alg, s) for s in stats]
             health = isnothing(health) ? counts : map((a, c) -> map(+, a, c), health, counts)
@@ -190,6 +274,13 @@ function sample_kinetic(out, post, xopt, strategy::FittingStrategy, rng; starts 
         end
     end
     foreach(flush_draws!, writers)
+    if alg isa KineticSamplers.MCLMC && !isempty(scalar_names)
+        X = stack(reduce(hcat, s) for s in scalars)
+        trajectory_report(
+            joinpath(out, "trajectory_report.toml"), scalar_names, X, host_params.step_size,
+            host_params.trajectory_length, block, d
+        )
+    end
     isnothing(moves) || foreach(move_summary(moves)) do m
         @info "move $(m.name): warmup $(m.warmup.accepted)/$(m.warmup.proposed), " *
             "sampling $(m.sampling.accepted)/$(m.sampling.proposed) accepted" * _scale_text(m.τ)
@@ -198,17 +289,108 @@ function sample_kinetic(out, post, xopt, strategy::FittingStrategy, rng; starts 
     return load_kinetic_chains(out, 1:stride:strategy.nsample)
 end
 
-# The sampler of `strategy` and the one its warmup runs.
-function kinetic_samplers(strategy::FittingStrategy)
+"""
+    scalar_leaves(θ)
+
+The scalar parameters of the draw `θ` as `name => value` pairs: its real numbers and its
+tuples and vectors of at most $(SCALAR_BLOCK) reals, named by their path, such as `"sky.ρa[2]"`.
+"""
+scalar_leaves(θ) = scalar_leaves!(Pair{String, Float64}[], "", θ)
+
+function scalar_leaves!(out, prefix, x)
+    if x isa Real
+        push!(out, prefix => Float64(x))
+    elseif x isa NamedTuple
+        for (k, v) in pairs(x)
+            scalar_leaves!(out, isempty(prefix) ? string(k) : "$prefix.$k", v)
+        end
+    elseif (x isa AbstractArray{<:Real} || x isa Tuple{Vararg{Real}}) && length(x) <= SCALAR_BLOCK
+        for (i, v) in pairs(x)
+            push!(out, "$prefix[$i]" => Float64(v))
+        end
+    end
+    return out
+end
+
+"""
+    trajectory_report(path, names, X, h, L, steps_per_draw, d)
+
+The autocorrelation times of the scalar parameters `names` of MCLMC chains on `d` latent
+coordinates at step size `h` and trajectory length `L`, from their draws `X` (parameters ×
+draws × chains, one draw every `steps_per_draw` steps), estimated from all chains together
+by `KineticSamplers.multichain_times`. For each parameter, `R = τ h / L` is its time τ in steps
+times `h`, in units of the trajectory length. A time above a tenth of the draws per chain is a
+lower bound, and so is its `R`. A large `R` does not by itself mean that a longer trajectory
+would mix the parameter faster: in curved geometry a longer trajectory can mix it slower.
+
+Logs the $(TRAJECTORY_REPORTED) parameters with the largest `R` and writes every parameter's
+time, effective sample size and `R` to `path` as TOML.
+"""
+function trajectory_report(path, names, X, h, L, steps_per_draw, d)
+    length(names) == size(X, 1) ||
+        throw(DimensionMismatch("$(length(names)) names for $(size(X, 1)) parameters"))
+    n, K = size(X, 2), size(X, 3)
+    τ = KineticSamplers.multichain_times(X)
+    rows = [
+        (; name, tau_steps = t * steps_per_draw, ess = n * K / t, R = t * steps_per_draw * h / L,
+            resolved = t < n / 10)
+            for (name, t) in zip(names, τ) if isfinite(t)
+    ]
+    isempty(rows) && (@warn "no scalar parameter varies over the draws; no trajectory report"; return nothing)
+    sort!(rows; by = r -> r.R, rev = true)
+    sq = sqrt(d)
+    @info @sprintf(
+        "MCLMC autocorrelation times at step size %.4g and trajectory length %.4g = %.3g √d (R = τ h / L): %s",
+        h, L, L / sq, join((@sprintf("%s τ %s%.0f steps, ESS %.0f, R %.2g", r.name,
+            r.resolved ? "" : "≥ ", r.tau_steps, r.ess, r.R) for r in first(rows, TRAJECTORY_REPORTED)), "; ")
+    )
+    open(path, "w") do io
+        TOML.print(io, Dict(
+            "step_size" => h, "trajectory_length" => L, "trajectory_length_sqrt_d" => L / sq,
+            "steps_per_draw" => steps_per_draw, "draws_per_chain" => n, "chains" => K,
+            "parameters" => [Dict(String(k) => v for (k, v) in pairs(r)) for r in rows],
+        ))
+    end
+    return nothing
+end
+
+const MCLMC_INTEGRATOR = Dict(
+    "mclachlan" => KineticSamplers.McLachlan(), "leapfrog" => KineticSamplers.Leapfrog(),
+    "baoab" => KineticSamplers.BAOAB(),
+)
+
+# The sampler of `strategy` on `d` latent coordinates and the one its warmup runs.
+function kinetic_samplers(strategy::FittingStrategy, d)
     if strategy.algorithm == "mclmc"
-        # Halving would let stored positions reach regions whose curvature caps the adapted step.
-        return KineticSamplers.MCLMC(; strategy.max_step_halvings),
-            KineticSamplers.MCLMC(; max_step_halvings = 0)
+        integrator = MCLMC_INTEGRATOR[strategy.integrator]
+        max_error = isnothing(strategy.max_energy_error) ? 0.25 : strategy.max_energy_error / sqrt(d)
+        sampling = KineticSamplers.MCLMC(; integrator, strategy.max_step_halvings, max_error)
+        # McLachlan's warmup runs without halving, so the step-size adaptation sees the energy
+        # error of every full step. BAOAB's lower stability limit makes unhalved steps diverge
+        # repeatedly in stiff states, so its warmup halves as sampling does.
+        integrator isa KineticSamplers.BAOAB && return sampling, sampling
+        return sampling, KineticSamplers.MCLMC(; integrator, max_step_halvings = 0)
     elseif strategy.algorithm == "walnuts"
         alg = KineticSamplers.WALNUTS(; max_depth = strategy.max_tree_depth)
         return alg, alg
     end
     return error("sampler.algorithm = $(repr(strategy.algorithm)) is not a KineticSamplers algorithm")
+end
+
+"""
+    mclmc_cap_phase(alg, strategy) -> Float64
+
+The phase per step, at the median whitened curvature, of the MCLMC warmup's step-size cap:
+`strategy.max_mode_phase`, or $(MCLACHLAN_CAP_PHASE) with McLachlan's integrator. Other
+integrators have no default and need `sampler.max_mode_phase`.
+"""
+function mclmc_cap_phase(alg, strategy)
+    isnothing(strategy.max_mode_phase) || return strategy.max_mode_phase
+    alg.integrator isa KineticSamplers.McLachlan && return MCLACHLAN_CAP_PHASE
+    return error(
+        "sampler.max_mode_phase must be set for the integrator $(nameof(typeof(alg.integrator))): " *
+            "the default phase of the step-size cap, $(MCLACHLAN_CAP_PHASE) at the median curvature, applies to McLachlan's"
+    )
 end
 
 # A block of `block` MCLMC steps keeps its last position; one of `block` WALNUTS draws keeps
@@ -293,7 +475,7 @@ check_chains(target, rngs, alg::KineticSamplers.MCLMC, params, chains, block, d)
 check_chains(target, rngs, ::KineticSamplers.WALNUTS, params, chains, block, d) = (chains, nothing)
 
 # Runs MCLMC_CHECK_BLOCKS blocks and applies KineticSamplers' end-of-warmup energy check to them,
-# logging each chain's statistics first.
+# logging each chain's statistics first; a failed check is a warning.
 function check_mclmc(target, rngs, alg, params, chains, block, d)
     recorder = KineticSamplers.NoPositions()
     trace = nothing
@@ -317,7 +499,12 @@ function check_mclmc(target, rngs, alg, params, chains, block, d)
             k, st.halved, st.divergent, st.energy_var
         )
     end
-    KineticSamplers.check_energy(energies, d)
+    try
+        KineticSamplers.check_energy(energies, d)
+    catch err
+        err isa ErrorException || rethrow()
+        @warn "MCLMC check failed, sampling continues: $(err.msg)"
+    end
     return chains, trace
 end
 
@@ -328,16 +515,74 @@ _host_params(p) = (; p.step_size, p.trajectory_length, inverse_mass = _host_mass
 
 function _log_warmup(::KineticSamplers.MCLMC, params, history, d, seconds)
     c = history.curvature
-    isnothing(c) || @info @sprintf(
-        "MCLMC curvature cap: step size cap %.4g at λ_q %.4g (λ median %.4g, max %.4g over %d positions)",
-        c.step_size_cap, c.curvature, c.median, c.max, c.positions
-    )
     @info @sprintf(
-        "MCLMC warmup done in %.0f s: step size %.4g, trajectory length %.4g = %.2f √d, inverse mass rank %d",
+        "MCLMC warmup done in %.0f s: step size %.4g, trajectory length %.4g = %.2f √d, inverse mass rank %d%s",
         seconds, params.step_size, params.trajectory_length,
-        params.trajectory_length / sqrt(d), size(params.inverse_mass.vecs, 2)
+        params.trajectory_length / sqrt(d), size(params.inverse_mass.vecs, 2),
+        isnothing(c) ? ", no step-size cap" : @sprintf(
+            ", step-size cap %.4g at the median curvature %.4g (0.99 quantile %.4g, max %.4g over %d positions)",
+            c.step_size_cap, c.curvature, c.p99, c.max, c.positions
+        )
     )
     return nothing
+end
+
+# The worst estimates of a round of `KineticSamplers.measure_bias`, for the run log.
+function _bias_text(r, d)
+    where_(j) = j <= d ? "coordinate $j" : "direction $(j - d) of the inverse mass"
+    return @sprintf(
+        "largest mean bias %.3g ± %.2g sd (%s), largest variance bias %.3g ± %.2g (%s); %d means and %d variances unresolved",
+        r.worst_mean.bias, r.worst_mean.se, where_(r.worst_mean.monitored),
+        r.worst_variance.bias, r.worst_variance.se, where_(r.worst_variance.monitored),
+        r.unresolved_means, r.unresolved_variances
+    )
+end
+
+_bias_tolerances() = @sprintf(
+    "the tolerances of %.3g sd in a mean or %.3g of a variance (Monte Carlo errors at ESS %d)",
+    BIAS_CHECK.max_mean_bias, BIAS_CHECK.max_variance_bias, BIAS_ESS
+)
+
+# Logs the bias of MCLMC at `params` from `KineticSamplers.measure_bias` with `BIAS_CHECK`,
+# with a warning if it exceeds the tolerances, and returns the chains it ran.
+function _bias_diagnostic(rngs, target, alg, params, chains, d)
+    t0 = time()
+    chains, r = KineticSamplers.measure_bias(rngs, target, alg, params, chains, BIAS_CHECK)
+    text = @sprintf(
+        "MCLMC bias at the sampling step size, from coupled runs of %d steps with 1 and 2 substeps: %s (%.0f s)",
+        BIAS_CHECK.steps, _bias_text(r, d), time() - t0
+    )
+    if r.accepted
+        @info text
+    else
+        @warn text * "; above " * _bias_tolerances() * ", so the draws are biased at least there"
+    end
+    _flush_logs()
+    return chains
+end
+
+# `params` with the step size of `KineticSamplers.tune_step_size` with `BIAS_CHECK`, logging each
+# round, and the chains it ran.
+function _tune_step_size(rngs, target, alg, params, chains, d)
+    t0 = time()
+    function report(r)
+        @info @sprintf(
+            "MCLMC bias at step size %.4g, from coupled runs of %d steps with 1 and 2 substeps: %s; %s (%.0f s)",
+            r.step_size, BIAS_CHECK.steps, _bias_text(r, d),
+            r.accepted ? "accepted" : @sprintf("%.2g times the tolerance", r.ratio), time() - t0
+        )
+        _flush_logs()
+        return nothing
+    end
+    tuned, chains, rounds = KineticSamplers.tune_step_size(
+        rngs, target, alg, params, chains, BIAS_CHECK; report
+    )
+    @info @sprintf(
+        "MCLMC step size %.4g from the bias tuning (warmup: %.4g) within %s, after %d rounds (%.0f s)",
+        tuned.step_size, params.step_size, _bias_tolerances(), length(rounds), time() - t0
+    )
+    _flush_logs()
+    return tuned, chains
 end
 
 function _log_warmup(::KineticSamplers.WALNUTS, params, history, d, seconds)
@@ -353,7 +598,7 @@ end
 
 Draws of one chain written to `dir` as a Comrade sample directory (`samples/output_scan_*.jls`
 and `parameters.jls`), $(KINETIC_DRAWS_PER_FILE) draws per file, readable with
-`Comrade.load_samples(dir)` while the chain runs.
+`Comrade.load_samples(dir)` while the chain runs. A `dir` that holds draws is appended to.
 """
 mutable struct ChainDrawWriter
     dir::String
@@ -363,7 +608,40 @@ mutable struct ChainDrawWriter
     draws::Int
 end
 
-ChainDrawWriter(dir) = ChainDrawWriter(mkpath(dir), Any[], NamedTuple[], 0, 0)
+function ChainDrawWriter(dir)
+    p = joinpath(dir, "parameters.jls")
+    isfile(p) || return ChainDrawWriter(mkpath(dir), Any[], NamedTuple[], 0, 0)
+    o = deserialize(p).params
+    o.stride == KINETIC_DRAWS_PER_FILE && o.nsamples == o.nfiles * o.stride || error(
+        "$dir holds $(o.nsamples) draws in $(o.nfiles) files of $(o.stride); draws can be appended only to full files of $(KINETIC_DRAWS_PER_FILE)"
+    )
+    return ChainDrawWriter(dir, Any[], NamedTuple[], o.nfiles, o.nsamples)
+end
+
+# The draws per chain already written to `chain_dirs` (0 without any), which must agree.
+function _written_draws(chain_dirs)
+    counts = map(chain_dirs) do dir
+        p = joinpath(dir, "parameters.jls")
+        isfile(p) ? deserialize(p).params.nsamples : 0
+    end
+    allequal(counts) || error(
+        "the chains in $(dirname(first(chain_dirs))) hold different numbers of draws, $counts; sampling cannot resume"
+    )
+    return first(counts)
+end
+
+# Appends the scalar parameters (see `scalar_leaves`) of the first `n` draws of each chain in
+# `chain_dirs` to `scalars`, reading $(KINETIC_READ_DRAWS) draws at a time.
+function _read_scalars!(scalars, names, chain_dirs, n)
+    for (k, dir) in pairs(chain_dirs), lo in 1:KINETIC_READ_DRAWS:n
+        for θ in Comrade.postsamples(Comrade.load_samples(dir, lo:min(lo + KINETIC_READ_DRAWS - 1, n)))
+            leaves = scalar_leaves(θ)
+            isempty(names) && append!(names, first.(leaves))
+            push!(scalars[k], last.(leaves))
+        end
+    end
+    return scalars
+end
 
 function push_draw!(w::ChainDrawWriter, θ; stats...)
     push!(w.samples, θ)
