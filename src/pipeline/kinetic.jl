@@ -628,9 +628,10 @@ bias_check() = KineticSamplers.BiasCheck(; steps = BIAS_STEPS, ess = BIAS_ESS, m
 """
     bias_budget(strategy) -> Int
 
-The most coupled steps per chain the MCLMC step-size tuning runs in all: those whose three
-gradients each make up $(BIAS_BUDGET) of the gradients of sampling, `strategy.nsample` times
-`strategy.thin` times `strategy.chunk_size` steps per chain.
+The most coupled steps per chain the MCLMC step-size tuning runs in all. Each runs three
+integrator steps, one with one substep and two with two, so the budget's coupled steps cost
+$(BIAS_BUDGET) of the gradients of sampling, `strategy.nsample` times `strategy.thin` times
+`strategy.chunk_size` steps per chain.
 """
 bias_budget(strategy) =
     max(1, floor(Int, BIAS_BUDGET * strategy.nsample * strategy.thin * strategy.chunk_size / 3))
