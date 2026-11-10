@@ -386,9 +386,9 @@ function trajectory_report(path, names, X, h, L, steps_per_draw, d)
     τ = KineticSamplers.multichain_times(X)
     rows = [
         (;
-                name, tau_steps = t * steps_per_draw, ess = n * K / t, R = t * steps_per_draw * h / L,
-                resolved = t < n / 10,
-            )
+            name, tau_steps = t * steps_per_draw, ess = n * K / t, R = t * steps_per_draw * h / L,
+            resolved = t < n / 10,
+        )
             for (name, t) in zip(names, τ) if isfinite(t)
     ]
     isempty(rows) && (@warn "no scalar parameter varies over the draws; no trajectory report"; return nothing)
@@ -399,9 +399,9 @@ function trajectory_report(path, names, X, h, L, steps_per_draw, d)
         h, L, L / sq, join(
             (
                 @sprintf(
-                        "%s τ %s%.0f steps, ESS %.0f, R %.2g", r.name,
-                        r.resolved ? "" : "≥ ", r.tau_steps, r.ess, r.R
-                    ) for r in first(rows, TRAJECTORY_REPORTED)
+                    "%s τ %s%.0f steps, ESS %.0f, R %.2g", r.name,
+                    r.resolved ? "" : "≥ ", r.tau_steps, r.ess, r.R
+                ) for r in first(rows, TRAJECTORY_REPORTED)
             ), "; "
         )
     )
