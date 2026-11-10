@@ -72,16 +72,16 @@ Base.@kwdef struct FittingStrategy
     # MCLMC: steps per chain of the warmup's final phase, run at the sampling parameters
     final::Int = 0
     # MCLMC and WALNUTS: stiff directions of the inverse mass and the draws each estimate uses
-    stiff_directions::Int = 8
-    stiff_draws::Int = 2
+    stiff_directions::Int = 32
+    stiff_draws::Int = 8
     # MCLMC: the autocorrelation times the trajectory length follows, "all" recorded rows or
     # "projections" onto the low-rank directions of the inverse mass
-    trajectory_rows::String = "all"
+    trajectory_rows::String = "projections"
     # MCLMC: the quantile of those times the trajectory length follows (`nothing`: their mean),
     # the fraction of the way each refit window moves it, and the number of final windows
     trajectory_quantile::Union{Nothing, Float64} = nothing
-    refit_trajectory_step::Float64 = 1.0
-    window_iterations::Int = 1
+    refit_trajectory_step::Float64 = 0.5
+    window_iterations::Int = 2
     # "nuts", or "mclmc" or "walnuts" for KineticSamplers chains with `chains` chains and a
     # pooled warmup
     algorithm::String = "nuts"
@@ -99,6 +99,9 @@ Base.@kwdef struct FittingStrategy
     trajectory_length::Union{Nothing, Float64} = nothing
     # MCLMC samples at the step size of `KineticSamplers.tune_step_size` after the warmup.
     bias_tuning::Bool = true
+    # The MCLMC bias check's largest accepted bias of a mean, in standard deviations, of the
+    # scalar parameters and the inverse-mass directions; `√2` times it bounds a variance's.
+    bias_tolerance::Float64 = 0.03
     # Metropolis–Hastings moves run between sampler chunks or blocks (see `build_moves`).
     moves::Vector{MoveSpec} = MoveSpec[]
     # run
@@ -142,26 +145,29 @@ per chain (default 1000). For MCLMC a draw is kept every `thin` (default 1) bloc
 of a step whose energy error is too large: above `max_energy_error` in total (default 0.25 √d,
 KineticSamplers' default). `integrator` is MCLMC's integrator: `"mclachlan"` (default),
 `"leapfrog"` or `"baoab"` (see `KineticSamplers.BAOAB`). `max_mode_phase` is the phase per step
-at the median curvature of the MCLMC warmup's step-size cap (default 0.7 with McLachlan; it must
+at the median curvature of the MCLMC warmup's step-size cap (default 1.3 with McLachlan; it must
 be set with the other integrators; see [`sample_kinetic`](@ref)). `final` (default 20% of
 `nadapt`) is the MCLMC steps per chain of the warmup's final phase, which runs after the
 trajectory length is set, at the capped step size and that trajectory length, so the chains
-settle at the sampling parameters before any draw is kept. `stiff_directions` (default 8) and
-`stiff_draws` (default 2) set the `KineticSamplers.StiffDirections` of the inverse mass of MCLMC
+settle at the sampling parameters before any draw is kept. `stiff_directions` (default 32) and
+`stiff_draws` (default 8) set the `KineticSamplers.StiffDirections` of the inverse mass of MCLMC
 and WALNUTS: the number of stiff directions it shrinks and the draws whose Hessians each
-estimate uses. For MCLMC, `trajectory_rows` (default `"all"`) is the rows of the warmup's windows
+estimate uses. For MCLMC, `trajectory_rows` (default `"projections"`) is the rows of the warmup's windows
 whose autocorrelation times set the trajectory length: `"all"` the recorded coordinates and the
 projections onto the low-rank directions of the inverse mass, `"projections"` the projections
 alone, which include the slowest directions. `trajectory_quantile` (default: the mean) takes
-that quantile of their autocorrelation times instead, `refit_trajectory_step` (default 1) is the
+that quantile of their autocorrelation times instead, `refit_trajectory_step` (default 0.5) is the
 fraction of the way, on a log scale, that each window after a refit moves the trajectory length
-toward its estimate, and `window_iterations` (default 1) is the number of windows after the
+toward its estimate, and `window_iterations` (default 2) is the number of windows after the
 adaptation, each starting at the trajectory length the one before gave. `trajectory_length`, in
 units of √d, fixes MCLMC's trajectory length, and the warmup then runs no window; left out, the
 windows set it. `step_size` fixes MCLMC's sampling step size; left out, the warmup's adapted
 step size is used. `bias_tuning` (default true unless `step_size` is set) reduces the warmup's
 MCLMC step size until a coupled bias check passes (see [`sample_kinetic`](@ref));
-`bias_tuning = true` is an error with `step_size`. After sampling, the run logs and writes the
+`bias_tuning = true` is an error with `step_size`. `bias_tolerance` (default 0.03) is the
+check's largest accepted bias of a mean of the scalar parameters and the directions of the
+inverse mass, in standard deviations; `√2` times it bounds the relative bias of a variance.
+After sampling, the run logs and writes the
 autocorrelation times of the scalar parameters in units of the trajectory length (see
 [`trajectory_report`](@ref)). For WALNUTS every draw is kept, `chunk_size`
 (default 10) is the draws per sampling block, which must divide `nsample`, and `max_tree_depth`
@@ -251,7 +257,7 @@ function build_fitting_config(cfg::AbstractDict)
             "nsample", "nadapt", "step_size", "target_accept", "init_buffer",
             "term_buffer", "max_tree_depth", "chunk_size", "moves", "moves_per_chunk",
             "algorithm", "chains", "max_step_halvings", "integrator", "max_energy_error",
-            "max_mode_phase", "trajectory_length", "bias_tuning", "thin", "final",
+            "max_mode_phase", "trajectory_length", "bias_tuning", "bias_tolerance", "thin", "final",
             "stiff_directions", "stiff_draws", "trajectory_rows", "trajectory_quantile",
             "refit_trajectory_step", "window_iterations",
         ),
@@ -311,7 +317,7 @@ function build_fitting_config(cfg::AbstractDict)
             "chains" => KINETIC_ALGORITHMS, "max_step_halvings" => ("mclmc",),
             "integrator" => ("mclmc",), "max_energy_error" => ("mclmc",),
             "max_mode_phase" => ("mclmc",),
-            "trajectory_length" => ("mclmc",), "bias_tuning" => ("mclmc",), "thin" => ("mclmc",),
+            "trajectory_length" => ("mclmc",), "bias_tuning" => ("mclmc",), "bias_tolerance" => ("mclmc",), "thin" => ("mclmc",),
             "final" => ("mclmc",), "trajectory_rows" => ("mclmc",),
             "trajectory_quantile" => ("mclmc",), "refit_trajectory_step" => ("mclmc",),
             "window_iterations" => ("mclmc",),
@@ -340,12 +346,12 @@ function build_fitting_config(cfg::AbstractDict)
     nadapt = Int(get(samp, "nadapt", get(KINETIC_WARMUP, algorithm, 5_000)))
     final = Int(get(samp, "final", algorithm == "mclmc" ? round(Int, 0.2 * nadapt) : 0))
     final >= 0 || error("sampler.final must be nonnegative, got $final")
-    stiff_directions = Int(get(samp, "stiff_directions", 8))
+    stiff_directions = Int(get(samp, "stiff_directions", 32))
     stiff_directions >= 1 ||
         error("sampler.stiff_directions must be at least 1, got $stiff_directions")
-    stiff_draws = Int(get(samp, "stiff_draws", 2))
+    stiff_draws = Int(get(samp, "stiff_draws", 8))
     stiff_draws >= 1 || error("sampler.stiff_draws must be at least 1, got $stiff_draws")
-    trajectory_rows = String(get(samp, "trajectory_rows", "all"))
+    trajectory_rows = String(get(samp, "trajectory_rows", "projections"))
     trajectory_rows in ("all", "projections") || error(
         "sampler.trajectory_rows must be \"all\" or \"projections\", got $(repr(trajectory_rows))"
     )
@@ -353,10 +359,10 @@ function build_fitting_config(cfg::AbstractDict)
         Float64(samp["trajectory_quantile"]) : nothing
     isnothing(trajectory_quantile) || 0 <= trajectory_quantile <= 1 ||
         error("sampler.trajectory_quantile must be in [0, 1], got $trajectory_quantile")
-    refit_trajectory_step = Float64(get(samp, "refit_trajectory_step", 1.0))
+    refit_trajectory_step = Float64(get(samp, "refit_trajectory_step", 0.5))
     0 < refit_trajectory_step <= 1 ||
         error("sampler.refit_trajectory_step must be in (0, 1], got $refit_trajectory_step")
-    window_iterations = Int(get(samp, "window_iterations", 1))
+    window_iterations = Int(get(samp, "window_iterations", 2))
     window_iterations >= 1 ||
         error("sampler.window_iterations must be at least 1, got $window_iterations")
     (algorithm == "walnuts" && nsample % chunk_size != 0) && error(
@@ -413,6 +419,7 @@ function build_fitting_config(cfg::AbstractDict)
             get(samp, "trajectory_length", nothing), "sampler.trajectory_length"
         ),
         bias_tuning,
+        bias_tolerance = _positive_or_nothing(get(samp, "bias_tolerance", 0.03), "sampler.bias_tolerance"),
         latent_space = latent_space,
         use_reactant = use_reactant,
         device,

@@ -11,9 +11,11 @@ const MCLMC_CHECK_BLOCKS = 10
 const SCALAR_BLOCK = 8
 const TRAJECTORY_REPORTED = 5
 const CAP_QUANTILE = 0.5
-const MCLACHLAN_CAP_PHASE = 0.7
+const MCLACHLAN_CAP_PHASE = 1.3
 const BIAS_ESS = 100
-const BIAS_CHECK = KineticSamplers.BiasCheck(; ess = BIAS_ESS)
+const BIAS_STEPS = 2000
+const BIAS_MAX_STEPS = 16 * BIAS_STEPS
+const BIAS_MAX_ROUNDS = 10
 const FINAL_TREND_BLOCKS = 5
 
 """
@@ -85,12 +87,14 @@ trend in it (see [`warn_trends`](@ref)). With `strategy.trajectory_length`, the 
 no window and the trajectory length is `strategy.trajectory_length` times √d, and with
 `strategy.step_size` MCLMC samples at that step size instead of the warmup's. After the MCLMC
 warmup, `KineticSamplers.measure_bias` estimates the bias of the sampling parameters from
-coupled runs of $(BIAS_CHECK.steps) steps with one and two substeps. Its tolerances are the
-Monte Carlo errors at an effective sample size of $(BIAS_ESS):
-$(round(BIAS_CHECK.max_mean_bias; sigdigits = 3)) standard deviations in a mean and
-$(round(BIAS_CHECK.max_variance_bias; sigdigits = 3)) of a variance. With
+coupled runs of $(BIAS_STEPS) steps with one and two substeps (see [`bias_check`](@ref)). The
+latent coordinates of the scalar parameters and the directions of the inverse mass have the
+tolerance `strategy.bias_tolerance` standard deviations in a mean and `√2` times it in a
+variance, and the other coordinates the Monte Carlo errors at an effective sample size of
+$(BIAS_ESS). With
 `strategy.bias_tuning`, `KineticSamplers.tune_step_size` reduces the step size until the
-estimates are within them, logging each round, and the warmup file holds the reduced step size.
+estimates are within them, in at most $(BIAS_MAX_ROUNDS) rounds of coupled runs of up to
+$(BIAS_MAX_STEPS) steps, logging each round, and the warmup file holds the reduced step size.
 Without it the estimate is logged, with a warning if it exceeds them, and sampling continues at
 the warmup's step size. Then $(MCLMC_CHECK_BLOCKS) blocks at the sampling parameters
 follow, whose energy statistics are logged per chain; if they fail
@@ -127,6 +131,7 @@ function sample_kinetic(out, post, xopt, strategy::FittingStrategy, rng; starts 
     )
     tb = Comrade.CoordinateView(post_cpu, space).tbase
     d = dimension(tb)
+    check = bias_check(strategy, scalar_coordinates(Comrade.maybe_transport(post_cpu, space)))
     target = KineticSamplers.Target(LatentTarget(tpost, d); backend = ADTypes.AutoReactant())
     alg, warmup_alg = kinetic_samplers(strategy, d)
     name = String(nameof(typeof(alg)))
@@ -264,7 +269,7 @@ function sample_kinetic(out, post, xopt, strategy::FittingStrategy, rng; starts 
         _log_warmup(alg, params, history, d, time() - t0)
         alg isa KineticSamplers.MCLMC && strategy.final > 0 && warn_trends(final_scalars)
         if alg isa KineticSamplers.MCLMC && strategy.bias_tuning
-            params, chains = _tune_step_size(rngs, target, alg, params, chains, d)
+            params, chains = _tune_step_size(rngs, target, alg, params, chains, d, check)
         end
         host_params = _host_params(params)
         serialize(warmup_file, (; history, params = host_params))
@@ -272,7 +277,7 @@ function sample_kinetic(out, post, xopt, strategy::FittingStrategy, rng; starts 
 
     params = Reactant.to_rarray(params; track_numbers = Number)
     if alg isa KineticSamplers.MCLMC && done == 0 && !strategy.bias_tuning
-        chains = _bias_diagnostic(rngs, target, alg, params, chains, d)
+        chains = _bias_diagnostic(rngs, target, alg, params, chains, d, check)
     end
     chains, trace = check_chains(target, rngs, alg, params, chains, block, d)
     writers = [ChainDrawWriter(dir) for dir in chain_dirs]
@@ -601,48 +606,91 @@ function _bias_text(r, d)
     )
 end
 
-_bias_tolerances() = @sprintf(
-    "the tolerances of %.3g sd in a mean or %.3g of a variance (Monte Carlo errors at ESS %d)",
-    BIAS_CHECK.max_mean_bias, BIAS_CHECK.max_variance_bias, BIAS_ESS
+_bias_tolerances(check) = @sprintf(
+    "the tolerances of %.3g sd in a mean or %.3g of a variance for the %d scalar coordinates and the inverse-mass directions, %.3g or %.3g elsewhere (Monte Carlo errors at ESS %d)",
+    check.focus_mean_bias, check.focus_variance_bias, length(check.focus), check.max_mean_bias,
+    check.max_variance_bias, BIAS_ESS
 )
 
-# Logs the bias of MCLMC at `params` from `KineticSamplers.measure_bias` with `BIAS_CHECK`,
-# with a warning if it exceeds the tolerances, and returns the chains it ran.
-function _bias_diagnostic(rngs, target, alg, params, chains, d)
+"""
+    bias_check(strategy, focus) -> KineticSamplers.BiasCheck
+
+The bias check of an MCLMC run: coupled runs of $(BIAS_STEPS) steps, doubled up to
+$(BIAS_MAX_STEPS) while a round is undecided, with the Monte Carlo errors at an effective sample
+size of $(BIAS_ESS) as the tolerances of most coordinates, and for the latent coordinates `focus`
+and the directions of the inverse mass `strategy.bias_tolerance` standard deviations in a mean
+and `√2` times it in a variance.
+"""
+function bias_check(strategy, focus)
+    t = strategy.bias_tolerance
+    return KineticSamplers.BiasCheck(;
+        steps = BIAS_STEPS, ess = BIAS_ESS, focus, focus_mean_bias = t,
+        focus_variance_bias = sqrt(2) * t, max_steps = BIAS_MAX_STEPS
+    )
+end
+
+"""
+    scalar_coordinates(tpost) -> Vector{Int}
+
+The latent coordinates of `tpost` that belong to parameters of at most $(SCALAR_BLOCK) latent
+coordinates, such as hyperparameters, as opposed to images and gain tables.
+"""
+function scalar_coordinates(tpost)
+    return _scalar_coordinates!(Int[], PT.transport_node(tpost.transform), 0)
+end
+
+function _scalar_coordinates!(out, t, offset)
+    if t isa PT.TupleTransport
+        for c in getfield(t, :transports)
+            _scalar_coordinates!(out, c, offset)
+            offset += PT.dimension(c)
+        end
+    elseif PT.dimension(t) <= SCALAR_BLOCK
+        append!(out, offset .+ (1:PT.dimension(t)))
+    end
+    return out
+end
+
+# Logs the bias of MCLMC at `params` from `KineticSamplers.measure_bias` with `check`, with a
+# warning if it exceeds the tolerances, and returns the chains it ran.
+function _bias_diagnostic(rngs, target, alg, params, chains, d, check)
     t0 = time()
-    chains, r = KineticSamplers.measure_bias(rngs, target, alg, params, chains, BIAS_CHECK)
+    chains, r = KineticSamplers.measure_bias(rngs, target, alg, params, chains, check)
     text = @sprintf(
         "MCLMC bias at the sampling step size, from coupled runs of %d steps with 1 and 2 substeps: %s (%.0f s)",
-        BIAS_CHECK.steps, _bias_text(r, d), time() - t0
+        check.steps, _bias_text(r, d), time() - t0
     )
     if r.accepted
         @info text
     else
-        @warn text * "; above " * _bias_tolerances() * ", so the draws are biased at least there"
+        @warn text * "; not within " * _bias_tolerances(check) * ", so the draws may be biased there"
     end
     _flush_logs()
     return chains
 end
 
-# `params` with the step size of `KineticSamplers.tune_step_size` with `BIAS_CHECK`, logging each
+# `params` with the step size of `KineticSamplers.tune_step_size` with `check`, logging each
 # round, and the chains it ran.
-function _tune_step_size(rngs, target, alg, params, chains, d)
+function _tune_step_size(rngs, target, alg, params, chains, d, check)
     t0 = time()
     function report(r)
         @info @sprintf(
             "MCLMC bias at step size %.4g, from coupled runs of %d steps with 1 and 2 substeps: %s; %s (%.0f s)",
-            r.step_size, BIAS_CHECK.steps, _bias_text(r, d),
-            r.accepted ? "accepted" : @sprintf("%.2g times the tolerance", r.ratio), time() - t0
+            r.step_size, r.steps, _bias_text(r, d),
+            r.accepted ? "accepted" : r.rejected ? @sprintf("rejected, %.2g times the tolerance", r.ratio) : "undecided",
+            time() - t0
         )
         _flush_logs()
         return nothing
     end
     tuned, chains, rounds = KineticSamplers.tune_step_size(
-        rngs, target, alg, params, chains, BIAS_CHECK; report
+        rngs, target, alg, params, chains, check; report, max_rounds = BIAS_MAX_ROUNDS
     )
     @info @sprintf(
-        "MCLMC step size %.4g from the bias tuning (warmup: %.4g) within %s, after %d rounds (%.0f s)",
-        tuned.step_size, params.step_size, _bias_tolerances(), length(rounds), time() - t0
+        "MCLMC step size %.4g from the bias tuning (warmup: %.4g) %s %s, after %d rounds (%.0f s)",
+        tuned.step_size, params.step_size,
+        last(rounds).accepted ? "within" : "unmeasured; no round was within",
+        _bias_tolerances(check), length(rounds), time() - t0
     )
     _flush_logs()
     return tuned, chains

@@ -5,7 +5,7 @@ using Random
 using Serialization: deserialize
 using LinearAlgebra
 using Statistics: cov, mean
-using Distributions: LogNormal, Normal, cdf, logpdf, quantile
+using Distributions: Exponential, LogNormal, MvNormal, Normal, cdf, logpdf, quantile
 import Enzyme
 
 const EXDIR = normpath(joinpath(@__DIR__, "..", "examples"))
@@ -565,19 +565,19 @@ exconfig(f) = TOML.parsefile(joinpath(EXDIR, f))
         edited(c, section, edits...) = merge(c, Dict(section => merge(c[section], Dict(edits...))))
         smc = build_fitting_config(mc)
         @test smc.final == round(Int, 0.2 * smc.nadapt)
-        @test (smc.stiff_directions, smc.stiff_draws) == (8, 2)
-        @test (smc.trajectory_rows, smc.trajectory_quantile) == ("all", nothing)
-        @test (smc.refit_trajectory_step, smc.window_iterations) == (1.0, 1)
+        @test (smc.stiff_directions, smc.stiff_draws) == (32, 8)
+        @test (smc.trajectory_rows, smc.trajectory_quantile) == ("projections", nothing)
+        @test (smc.refit_trajectory_step, smc.window_iterations) == (0.5, 2)
         tuned = build_fitting_config(
             edited(
-                mc, "sampler", "final" => 0, "stiff_directions" => 32, "stiff_draws" => 8,
-                "trajectory_rows" => "projections", "trajectory_quantile" => 0.9,
-                "refit_trajectory_step" => 0.5, "window_iterations" => 2
+                mc, "sampler", "final" => 0, "stiff_directions" => 16, "stiff_draws" => 4,
+                "trajectory_rows" => "all", "trajectory_quantile" => 0.9,
+                "refit_trajectory_step" => 0.25, "window_iterations" => 3
             )
         )
-        @test (tuned.final, tuned.stiff_directions, tuned.stiff_draws) == (0, 32, 8)
-        @test (tuned.trajectory_rows, tuned.trajectory_quantile) == ("projections", 0.9)
-        @test (tuned.refit_trajectory_step, tuned.window_iterations) == (0.5, 2)
+        @test (tuned.final, tuned.stiff_directions, tuned.stiff_draws) == (0, 16, 4)
+        @test (tuned.trajectory_rows, tuned.trajectory_quantile) == ("all", 0.9)
+        @test (tuned.refit_trajectory_step, tuned.window_iterations) == (0.25, 3)
         @test_throws "sampler.final must be nonnegative, got -1" build_fitting_config(edited(mc, "sampler", "final" => -1))
         @test_throws "sampler.stiff_directions must be at least 1, got 0" build_fitting_config(edited(mc, "sampler", "stiff_directions" => 0))
         @test_throws "sampler.stiff_draws must be at least 1, got 0" build_fitting_config(edited(mc, "sampler", "stiff_draws" => 0))
@@ -645,6 +645,20 @@ exconfig(f) = TOML.parsefile(joinpath(EXDIR, f))
         @test !build_fitting_config(edited(mc, "sampler", "step_size" => 8.25)).bias_tuning
         @test_throws "sampler.step_size and sampler.bias_tuning = true both set the MCLMC step size; set one" build_fitting_config(edited(mc, "sampler", "bias_tuning" => true, "step_size" => 8.25))
         @test_throws "sampler.bias_tuning applies to sampler.algorithm = \"mclmc\" only, not \"walnuts\"" build_fitting_config(edited(wn, "sampler", "bias_tuning" => true))
+        @test build_fitting_config(mc).bias_tolerance == 0.03
+        @test build_fitting_config(edited(mc, "sampler", "bias_tolerance" => 0.05)).bias_tolerance == 0.05
+        @test_throws "sampler.bias_tolerance must be a positive number, got 0" build_fitting_config(edited(mc, "sampler", "bias_tolerance" => 0))
+        @test_throws "sampler.bias_tolerance applies to sampler.algorithm = \"mclmc\" only, not \"walnuts\"" build_fitting_config(edited(wn, "sampler", "bias_tolerance" => 0.05))
+        check = BlackboxComrade.bias_check(build_fitting_config(mc), [1, 3])
+        @test check.focus == [1, 3] && check.focus_mean_bias == 0.03
+        @test check.focus_variance_bias ≈ sqrt(2) * 0.03
+        @test check.max_mean_bias == 0.1 && check.steps == 2000 && check.max_steps == 32000
+        # Parameters of at most 8 latent coordinates are scalar; a 20-pixel image is not.
+        tree = BlackboxComrade.PT.transport_node(
+            (a = Normal(), img = MvNormal(zeros(20), 1.0), b = (c = Exponential(), d = MvNormal(zeros(3), 1.0))),
+            BlackboxComrade.PT.StdNormal()
+        )
+        @test BlackboxComrade._scalar_coordinates!(Int[], tree, 0) == [1, 22, 23, 24, 25]
         @test_throws "is not a KineticSamplers algorithm" BlackboxComrade.kinetic_samplers(build_fitting_config(cfg5), 16)
 
         mc["sampler"]["algorithm"] = "nuts"
@@ -1541,6 +1555,16 @@ exconfig(f) = TOML.parsefile(joinpath(EXDIR, f))
                     θ1 = θd[1]
                     θbad = BlackboxComrade.@set θ1.sky.mean.fwhm = 0.0
                     @test_throws "non-finite latent coordinates in sky.mean.fwhm" BB.check_start(posts, BB.PT.StdNormal(), θbad)
+
+                    # the latent coordinates of the scalar parameters, for the bias check
+                    sc = BB.scalar_coordinates(Comrade.maybe_transport(posts, BB.PT.StdNormal()))
+                    @test 0 < length(sc) < n && allunique(sc)
+                    θfw = BlackboxComrade.@set θ1.sky.mean.fwhm = 2 * θ1.sky.mean.fwhm
+                    @test only(findall(Comrade.inverse(tps, θfw) .!= us[1])) in sc
+                    rest = setdiff(1:n, sc)
+                    ub = copy(us[1])
+                    ub[rest] .+= 0.1
+                    @test BB.scalar_leaves(Comrade.transform(tps, ub)) == BB.scalar_leaves(Comrade.transform(tps, us[1]))
 
                     # real-line phase chains: the start re-wrap and the ±2π sheet move
                     xs1 = Comrade.transform(tps, us[1])
