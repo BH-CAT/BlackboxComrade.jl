@@ -201,6 +201,8 @@ function sample_kinetic(out, post, xopt, strategy::FittingStrategy, rng; starts 
         )
     end
 
+    # The scalar parameters that still trend at the end of this run's warmup.
+    trends = String[]
     if done > 0
         host_params = deserialize(warmup_file).params
         m = host_params.inverse_mass
@@ -269,7 +271,8 @@ function sample_kinetic(out, post, xopt, strategy::FittingStrategy, rng; starts 
             params = KineticSamplers.IsokineticParameters(h, L, params.inverse_mass)
         end
         _log_warmup(alg, params, history, d, time() - t0)
-        alg isa KineticSamplers.MCLMC && strategy.final > 0 && warn_trends(final_scalars)
+        alg isa KineticSamplers.MCLMC && strategy.final > 0 &&
+            (trends = warn_trends(final_scalars))
         if alg isa KineticSamplers.MCLMC && strategy.bias_tuning
             params, chains = _tune_step_size(
                 rngs, target, alg, params, chains, d, check, bias_budget(strategy)
@@ -281,7 +284,7 @@ function sample_kinetic(out, post, xopt, strategy::FittingStrategy, rng; starts 
 
     params = Reactant.to_rarray(params; track_numbers = Number)
     if alg isa KineticSamplers.MCLMC && done == 0 && !strategy.bias_tuning
-        chains = _bias_diagnostic(rngs, target, alg, params, chains, d, check)
+        chains = _bias_diagnostic(rngs, target, alg, params, chains, d, check, trends)
     end
     chains, trace = check_chains(target, rngs, alg, params, chains, block, d)
     writers = [ChainDrawWriter(dir) for dir in chain_dirs]
@@ -639,22 +642,36 @@ $(BIAS_BUDGET) of the gradients of sampling, `strategy.nsample` times `strategy.
 bias_budget(strategy) =
     max(1, floor(Int, BIAS_BUDGET * strategy.nsample * strategy.thin * strategy.chunk_size / 3))
 
-# Logs the bias of MCLMC at `params` from `KineticSamplers.measure_bias` with `check`, with a
-# warning if it exceeds the tolerances, and returns the chains it ran.
-function _bias_diagnostic(rngs, target, alg, params, chains, d, check)
+# Logs the bias of MCLMC at `params` from `KineticSamplers.measure_bias` with `check` (see
+# `_bias_message`) and returns the chains it ran.
+function _bias_diagnostic(rngs, target, alg, params, chains, d, check, trends = String[])
     t0 = time()
     chains, r = KineticSamplers.measure_bias(rngs, target, alg, params, chains, check)
-    text = @sprintf(
-        "MCLMC bias at the sampling step size, from coupled runs of %d steps with 1 and 2 substeps: %s (%.0f s)",
-        check.steps, _bias_text(r, d), time() - t0
-    )
-    if r.rejected
-        @warn text * "; above " * _bias_tolerances(check) * ", so the draws are biased at least there"
-    else
-        @info text
-    end
+    text, warn = _bias_message(r, d, check, trends, time() - t0)
+    warn ? @warn(text) : @info(text)
     _flush_logs()
     return chains
+end
+
+# The log message of the bias round `r` and whether it is a warning: it is if the bias exceeds
+# the tolerances of `check`, or if the scalar parameters `trends` still trend at the end of the
+# warmup. The coupled runs start where the warmup ended, so while the chains drift the estimates
+# also hold how the two runs differ in that drift.
+function _bias_message(r, d, check, trends, seconds)
+    text = @sprintf(
+        "MCLMC bias at the sampling step size, from coupled runs of %d steps with 1 and 2 substeps: %s (%.0f s)",
+        check.steps, _bias_text(r, d), seconds
+    )
+    if r.rejected
+        text *= "; above " * _bias_tolerances(check)
+        isempty(trends) && (text *= ", so the draws are biased at least there")
+    end
+    if !isempty(trends)
+        text *= "; the warmup ended with $(join(trends, ", ")) still trending, so the chains " *
+            "may not have burned in, and these estimates may hold that drift as well as the " *
+            "bias of the integrator"
+    end
+    return text, r.rejected || !isempty(trends)
 end
 
 # `params` with the step size of `KineticSamplers.tune_step_size` with `check`, logging each

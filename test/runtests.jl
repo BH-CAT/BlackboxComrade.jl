@@ -666,6 +666,16 @@ exconfig(f) = TOML.parsefile(joinpath(EXDIR, f))
         # A quarter of the sampling's gradients, three per coupled step.
         kept = build_fitting_config(edited(mc, "sampler", "nsample" => 600, "thin" => 5, "chunk_size" => 100))
         @test BlackboxComrade.bias_budget(kept) == 25_000
+        worst = (; bias = 0.3, se = 0.1, monitored = 1)
+        r = (; worst_mean = worst, worst_variance = worst, unresolved_means = 0, unresolved_variances = 0, rejected = true)
+        text, warn = BlackboxComrade._bias_message(r, 5, check, String[], 1.0)
+        @test warn && occursin("so the draws are biased at least there", text)
+        text, warn = BlackboxComrade._bias_message(r, 5, check, ["sky.ρa[2]"], 1.0)
+        @test warn && !occursin("so the draws are biased", text) &&
+            occursin("the warmup ended with sky.ρa[2] still trending, so the chains may not have burned in", text)
+        text, warn = BlackboxComrade._bias_message((; r..., rejected = false), 5, check, ["sky.ρa[2]"], 1.0)
+        @test warn && !occursin("above", text) && occursin("may not have burned in", text)
+        @test !last(BlackboxComrade._bias_message((; r..., rejected = false), 5, check, String[], 1.0))
         @test_throws "is not a KineticSamplers algorithm" BlackboxComrade.kinetic_samplers(build_fitting_config(cfg5), 16)
 
         mc["sampler"]["algorithm"] = "nuts"
