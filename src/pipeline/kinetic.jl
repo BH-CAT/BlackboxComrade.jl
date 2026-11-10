@@ -75,7 +75,8 @@ for all chains. The MCLMC step size follows its energy error and is capped at th
 which a harmonic mode of the $(CAP_QUANTILE) quantile of the whitened curvature at positions of
 the warmup's records advances by the phase [`mclmc_cap_phase`](@ref) per step.
 The MCLMC warmup sets its trajectory length from the autocorrelation times of the rows
-`strategy.trajectory_rows`, by their mean or their `strategy.trajectory_quantile` quantile, moves
+`strategy.trajectory_rows`, by their `strategy.trajectory_quantile` quantile (by default the
+slowest row) or their mean, times `strategy.trajectory_factor`, moves
 it by `strategy.refit_trajectory_step` after each refit, runs `strategy.window_iterations`
 windows after the adaptation, and ends with a final phase of `strategy.final` steps per chain.
 MCLMC warms up without step halving, except with `integrator = "baoab"`, whose warmup halves
@@ -161,7 +162,9 @@ function sample_kinetic(out, post, xopt, strategy::FittingStrategy, rng; starts 
             final = strategy.final, curvature_quantile = CAP_QUANTILE,
             max_mode_phase = mclmc_cap_phase(alg, strategy),
             trajectory_rows = Symbol(strategy.trajectory_rows),
-            strategy.trajectory_quantile, strategy.refit_trajectory_step,
+            trajectory_quantile = strategy.trajectory_quantile == "mean" ? :mean :
+                strategy.trajectory_quantile,
+            strategy.trajectory_factor, strategy.refit_trajectory_step,
             strategy.window_iterations,
         )
     end

@@ -566,23 +566,31 @@ exconfig(f) = TOML.parsefile(joinpath(EXDIR, f))
         smc = build_fitting_config(mc)
         @test smc.final == round(Int, 0.2 * smc.nadapt)
         @test (smc.stiff_directions, smc.stiff_draws) == (32, 8)
-        @test (smc.trajectory_rows, smc.trajectory_quantile) == ("projections", nothing)
+        @test (smc.trajectory_rows, smc.trajectory_quantile) == ("all", nothing)
+        @test isnothing(smc.trajectory_factor)
         @test (smc.refit_trajectory_step, smc.window_iterations) == (1.0, 2)
         tuned = build_fitting_config(
             edited(
                 mc, "sampler", "final" => 0, "stiff_directions" => 16, "stiff_draws" => 4,
-                "trajectory_rows" => "all", "trajectory_quantile" => 0.9,
+                "trajectory_rows" => "projections", "trajectory_quantile" => 0.9,
+                "trajectory_factor" => 0.5,
                 "refit_trajectory_step" => 0.25, "window_iterations" => 3
             )
         )
         @test (tuned.final, tuned.stiff_directions, tuned.stiff_draws) == (0, 16, 4)
-        @test (tuned.trajectory_rows, tuned.trajectory_quantile) == ("all", 0.9)
+        @test (tuned.trajectory_rows, tuned.trajectory_quantile, tuned.trajectory_factor) ==
+            ("projections", 0.9, 0.5)
+        @test build_fitting_config(edited(mc, "sampler", "trajectory_quantile" => "mean")).trajectory_quantile ==
+            "mean"
+        @test build_fitting_config(edited(mc, "sampler", "trajectory_quantile" => 1)).trajectory_quantile === 1.0
+        @test_throws "sampler.trajectory_factor must be a positive number, got 0" build_fitting_config(edited(mc, "sampler", "trajectory_factor" => 0))
         @test (tuned.refit_trajectory_step, tuned.window_iterations) == (0.25, 3)
         @test_throws "sampler.final must be nonnegative, got -1" build_fitting_config(edited(mc, "sampler", "final" => -1))
         @test_throws "sampler.stiff_directions must be at least 1, got 0" build_fitting_config(edited(mc, "sampler", "stiff_directions" => 0))
         @test_throws "sampler.stiff_draws must be at least 1, got 0" build_fitting_config(edited(mc, "sampler", "stiff_draws" => 0))
         @test_throws "sampler.trajectory_rows must be \"all\" or \"projections\", got \"coordinates\"" build_fitting_config(edited(mc, "sampler", "trajectory_rows" => "coordinates"))
-        @test_throws "sampler.trajectory_quantile must be in [0, 1], got 1.5" build_fitting_config(edited(mc, "sampler", "trajectory_quantile" => 1.5))
+        @test_throws "sampler.trajectory_quantile must be in [0, 1] or \"mean\", got 1.5" build_fitting_config(edited(mc, "sampler", "trajectory_quantile" => 1.5))
+        @test_throws "sampler.trajectory_quantile must be in [0, 1] or \"mean\", got \"median\"" build_fitting_config(edited(mc, "sampler", "trajectory_quantile" => "median"))
         @test_throws "sampler.refit_trajectory_step must be in (0, 1], got 0.0" build_fitting_config(edited(mc, "sampler", "refit_trajectory_step" => 0.0))
         @test_throws "sampler.window_iterations must be at least 1, got 0" build_fitting_config(edited(mc, "sampler", "window_iterations" => 0))
         @test_throws "sampler.max_tree_depth applies to sampler.algorithm = \"nuts\" or \"walnuts\" only" build_fitting_config(edited(mc, "sampler", "max_tree_depth" => 8))

@@ -76,10 +76,13 @@ Base.@kwdef struct FittingStrategy
     stiff_draws::Int = 8
     # MCLMC: the autocorrelation times the trajectory length follows, "all" recorded rows or
     # "projections" onto the low-rank directions of the inverse mass
-    trajectory_rows::String = "projections"
-    # MCLMC: the quantile of those times the trajectory length follows (`nothing`: their mean),
-    # the fraction of the way each refit window moves it, and the number of final windows
-    trajectory_quantile::Union{Nothing, Float64} = nothing
+    trajectory_rows::String = "all"
+    # MCLMC: the quantile of those times the trajectory length follows, or "mean" (`nothing`:
+    # KineticSamplers' default, the slowest row), the factor on the step size times that time
+    # (`nothing`: KineticSamplers' default), the fraction of the way each refit window moves it,
+    # and the number of final windows
+    trajectory_quantile::Union{Nothing, Float64, String} = nothing
+    trajectory_factor::Union{Nothing, Float64} = nothing
     refit_trajectory_step::Float64 = 1.0
     window_iterations::Int = 2
     # "nuts", or "mclmc" or "walnuts" for KineticSamplers chains with `chains` chains and a
@@ -155,11 +158,13 @@ trajectory length is set, at the capped step size and that trajectory length, so
 settle at the sampling parameters before any draw is kept. `stiff_directions` (default 32) and
 `stiff_draws` (default 8) set the `KineticSamplers.StiffDirections` of the inverse mass of MCLMC
 and WALNUTS: the number of stiff directions it shrinks and the draws whose Hessians each
-estimate uses. For MCLMC, `trajectory_rows` (default `"projections"`) is the rows of the warmup's windows
-whose autocorrelation times set the trajectory length: `"all"` the recorded coordinates and the
+estimate uses. For MCLMC, `trajectory_rows` (default `"all"`) is the rows of the warmup's windows
+whose autocorrelation times set the trajectory length: `"all"` every latent coordinate and the
 projections onto the low-rank directions of the inverse mass, `"projections"` the projections
-alone, which include the slowest directions. `trajectory_quantile` (default: the mean) takes
-that quantile of their autocorrelation times instead, `refit_trajectory_step` (default 1) is the
+alone. `trajectory_quantile` (default 1, the slowest row) is the quantile of their
+autocorrelation times that sets it, or `"mean"` for their mean, and `trajectory_factor`
+(default 1, and 0.4 with the mean) is the factor on the step size times that time, both as in
+KineticSamplers' `PooledAdaptation`. `refit_trajectory_step` (default 1) is the
 fraction of the way, on a log scale, that each window after a refit moves the trajectory length
 toward its estimate, and `window_iterations` (default 2) is the number of windows after the
 adaptation, each starting at the trajectory length the one before gave. `trajectory_length`, in
@@ -259,7 +264,7 @@ function build_fitting_config(cfg::AbstractDict)
             "algorithm", "chains", "max_step_halvings", "integrator", "max_energy_error",
             "max_mode_phase", "max_mode_bias", "trajectory_length", "bias_tuning", "thin", "final",
             "stiff_directions", "stiff_draws", "trajectory_rows", "trajectory_quantile",
-            "refit_trajectory_step", "window_iterations",
+            "trajectory_factor", "refit_trajectory_step", "window_iterations",
         ),
         "[sampler]"
     )
@@ -319,7 +324,8 @@ function build_fitting_config(cfg::AbstractDict)
             "max_mode_phase" => ("mclmc",), "max_mode_bias" => ("mclmc",),
             "trajectory_length" => ("mclmc",), "bias_tuning" => ("mclmc",), "thin" => ("mclmc",),
             "final" => ("mclmc",), "trajectory_rows" => ("mclmc",),
-            "trajectory_quantile" => ("mclmc",), "refit_trajectory_step" => ("mclmc",),
+            "trajectory_quantile" => ("mclmc",), "trajectory_factor" => ("mclmc",),
+            "refit_trajectory_step" => ("mclmc",),
             "window_iterations" => ("mclmc",),
             "stiff_directions" => KINETIC_ALGORITHMS, "stiff_draws" => KINETIC_ALGORITHMS,
         )
@@ -351,14 +357,16 @@ function build_fitting_config(cfg::AbstractDict)
         error("sampler.stiff_directions must be at least 1, got $stiff_directions")
     stiff_draws = Int(get(samp, "stiff_draws", 8))
     stiff_draws >= 1 || error("sampler.stiff_draws must be at least 1, got $stiff_draws")
-    trajectory_rows = String(get(samp, "trajectory_rows", "projections"))
+    trajectory_rows = String(get(samp, "trajectory_rows", "all"))
     trajectory_rows in ("all", "projections") || error(
         "sampler.trajectory_rows must be \"all\" or \"projections\", got $(repr(trajectory_rows))"
     )
-    trajectory_quantile = haskey(samp, "trajectory_quantile") ?
-        Float64(samp["trajectory_quantile"]) : nothing
-    isnothing(trajectory_quantile) || 0 <= trajectory_quantile <= 1 ||
-        error("sampler.trajectory_quantile must be in [0, 1], got $trajectory_quantile")
+    trajectory_quantile = get(samp, "trajectory_quantile", nothing)
+    isnothing(trajectory_quantile) || trajectory_quantile == "mean" ||
+        trajectory_quantile isa Real && 0 <= trajectory_quantile <= 1 || error(
+        "sampler.trajectory_quantile must be in [0, 1] or \"mean\", got $(repr(trajectory_quantile))"
+    )
+    trajectory_quantile isa Real && (trajectory_quantile = Float64(trajectory_quantile))
     refit_trajectory_step = Float64(get(samp, "refit_trajectory_step", 1.0))
     0 < refit_trajectory_step <= 1 ||
         error("sampler.refit_trajectory_step must be in (0, 1], got $refit_trajectory_step")
@@ -406,6 +414,9 @@ function build_fitting_config(cfg::AbstractDict)
         stiff_draws,
         trajectory_rows,
         trajectory_quantile,
+        trajectory_factor = _positive_or_nothing(
+            get(samp, "trajectory_factor", nothing), "sampler.trajectory_factor"
+        ),
         refit_trajectory_step,
         window_iterations,
         moves,
