@@ -196,8 +196,11 @@ function sample_kinetic(out, post, xopt, strategy::FittingStrategy, rng; starts 
         end
         GC.gc()
         moved || return chains
-        return KineticSamplers.init_chains(
-            restart_rngs, target, phase === :warmup ? warmup_alg : alg, Θh
+        # Each move leaves the posterior of the position invariant, and the velocity is
+        # independent of the position, so the chains keep their velocities and the trajectory
+        # length still sets how long those persist.
+        return KineticSamplers.reposition_chains(
+            target, phase === :warmup ? warmup_alg : alg, chains, Θh
         )
     end
 
