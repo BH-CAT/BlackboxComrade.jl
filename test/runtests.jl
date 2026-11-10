@@ -646,8 +646,8 @@ exconfig(f) = TOML.parsefile(joinpath(EXDIR, f))
         @test isnothing(build_fitting_config(mc).step_size)
         @test_throws "sampler.step_size must be a positive number, got 0" build_fitting_config(edited(mc, "sampler", "step_size" => 0))
         @test_throws "sampler.step_size applies to sampler.algorithm = \"nuts\" or \"mclmc\" only, not \"walnuts\"" build_fitting_config(edited(wn, "sampler", "step_size" => 1.0))
-        @test build_fitting_config(mc).bias_tuning
-        @test !build_fitting_config(edited(mc, "sampler", "bias_tuning" => false)).bias_tuning
+        @test !build_fitting_config(mc).bias_tuning
+        @test build_fitting_config(edited(mc, "sampler", "bias_tuning" => true)).bias_tuning
         @test !build_fitting_config(edited(mc, "sampler", "step_size" => 8.25)).bias_tuning
         @test_throws "sampler.step_size and sampler.bias_tuning = true both set the MCLMC step size; set one" build_fitting_config(edited(mc, "sampler", "bias_tuning" => true, "step_size" => 8.25))
         @test_throws "sampler.bias_tuning applies to sampler.algorithm = \"mclmc\" only, not \"walnuts\"" build_fitting_config(edited(wn, "sampler", "bias_tuning" => true))

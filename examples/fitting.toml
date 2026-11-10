@@ -37,9 +37,9 @@ term_buffer = 500
 #                        # max_mode_bias is required with other integrators)
 # max_mode_bias = 0.05   # MCLMC only, instead of max_mode_phase: the variance bias of a harmonic
 #                        # mode that sets the cap's phase (0.05 gives 1.6 with McLachlan)
-# bias_tuning = true     # MCLMC only: reduce the warmup's step size until a coupled bias
-#                        # check passes (default true unless step_size is set; true is an
-#                        # error with step_size)
+# bias_tuning = false    # MCLMC only: reduce the warmup's step size until a coupled bias
+#                        # check passes (default false: the check runs once and is logged;
+#                        # true is an error with step_size)
 # reactant-only knobs:
 max_tree_depth = 10      # also WALNUTS's most trajectory doublings
 chunk_size = 100

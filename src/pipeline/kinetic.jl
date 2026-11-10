@@ -94,8 +94,8 @@ tolerances are the Monte Carlo errors at an effective sample size of $(BIAS_ESS)
 estimates are within them, in at most $(BIAS_MAX_ROUNDS) rounds of coupled runs of up to
 $(BIAS_MAX_STEPS) steps and at most $(BIAS_BUDGET) of the sampling's gradients (see
 [`bias_budget`](@ref)), logging each round, and the warmup file holds the reduced step size.
-Without it the estimate is logged, with a warning if it exceeds them, and sampling continues at
-the warmup's step size. Then $(MCLMC_CHECK_BLOCKS) blocks at the sampling parameters
+Without it the estimate is logged, with a warning if some estimate exceeds its tolerance by more
+than its margin of standard errors, and sampling continues at the warmup's step size. Then $(MCLMC_CHECK_BLOCKS) blocks at the sampling parameters
 follow, whose energy statistics are logged per chain; if they fail
 `KineticSamplers.check_energy`, a warning says so and sampling continues.
 
@@ -644,10 +644,10 @@ function _bias_diagnostic(rngs, target, alg, params, chains, d, check)
         "MCLMC bias at the sampling step size, from coupled runs of %d steps with 1 and 2 substeps: %s (%.0f s)",
         check.steps, _bias_text(r, d), time() - t0
     )
-    if r.accepted
-        @info text
+    if r.rejected
+        @warn text * "; above " * _bias_tolerances(check) * ", so the draws are biased at least there"
     else
-        @warn text * "; not within " * _bias_tolerances(check) * ", so the draws may be biased there"
+        @info text
     end
     _flush_logs()
     return chains

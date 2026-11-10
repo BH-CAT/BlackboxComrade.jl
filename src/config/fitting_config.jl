@@ -100,8 +100,9 @@ Base.@kwdef struct FittingStrategy
     max_mode_bias::Union{Nothing, Float64} = nothing
     # MCLMC's trajectory length in units of √d; `nothing` sets it from the warmup's window.
     trajectory_length::Union{Nothing, Float64} = nothing
-    # MCLMC samples at the step size of `KineticSamplers.tune_step_size` after the warmup.
-    bias_tuning::Bool = true
+    # MCLMC samples at the step size of `KineticSamplers.tune_step_size` after the warmup;
+    # without it the warmup's bias is measured and logged only.
+    bias_tuning::Bool = false
     # Metropolis–Hastings moves run between sampler chunks or blocks (see `build_moves`).
     moves::Vector{MoveSpec} = MoveSpec[]
     # run
@@ -164,9 +165,9 @@ toward its estimate, and `window_iterations` (default 2) is the number of window
 adaptation, each starting at the trajectory length the one before gave. `trajectory_length`, in
 units of √d, fixes MCLMC's trajectory length, and the warmup then runs no window; left out, the
 windows set it. `step_size` fixes MCLMC's sampling step size; left out, the warmup's adapted
-step size is used. `bias_tuning` (default true unless `step_size` is set) reduces the warmup's
-MCLMC step size until a coupled bias check passes (see [`sample_kinetic`](@ref));
-`bias_tuning = true` is an error with `step_size`. After sampling, the run logs and writes the
+step size is used. `bias_tuning` (default false) reduces the warmup's MCLMC step size until a
+coupled bias check passes (see [`sample_kinetic`](@ref)); without it the check runs once and is
+logged, and `bias_tuning = true` is an error with `step_size`. After sampling, the run logs and writes the
 autocorrelation times of the scalar parameters in units of the trajectory length (see
 [`trajectory_report`](@ref)). For WALNUTS every draw is kept, `chunk_size`
 (default 10) is the draws per sampling block, which must divide `nsample`, and `max_tree_depth`
@@ -377,7 +378,7 @@ function build_fitting_config(cfg::AbstractDict)
     haskey(samp, "max_mode_phase") && haskey(samp, "max_mode_bias") && error(
         "sampler.max_mode_phase and sampler.max_mode_bias both set the phase of the MCLMC step-size cap; set one"
     )
-    bias_tuning = Bool(get(samp, "bias_tuning", !haskey(samp, "step_size")))
+    bias_tuning = Bool(get(samp, "bias_tuning", false))
     bias_tuning && haskey(samp, "step_size") && error(
         "sampler.step_size and sampler.bias_tuning = true both set the MCLMC step size; set one"
     )
