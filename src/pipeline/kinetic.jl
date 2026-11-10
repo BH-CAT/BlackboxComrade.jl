@@ -10,12 +10,13 @@ const WALNUTS_MOVE_BLOCKS = 10
 const MCLMC_CHECK_BLOCKS = 10
 const SCALAR_BLOCK = 8
 const TRAJECTORY_REPORTED = 5
-const CAP_QUANTILE = 0.5
-const MCLACHLAN_CAP_PHASE = 1.3
+const CAP_QUANTILE = 0.99
+const MCLACHLAN_CAP_PHASE = 1.2
 const BIAS_ESS = 100
 const BIAS_STEPS = 2000
 const BIAS_MAX_STEPS = 16 * BIAS_STEPS
 const BIAS_MAX_ROUNDS = 10
+const BIAS_BUDGET = 0.25
 const FINAL_TREND_BLOCKS = 5
 
 """
@@ -71,8 +72,8 @@ WALNUTS draws per chain, in blocks of `strategy.chunk_size` MCLMC steps or of Ki
 default length for WALNUTS, adapts one step size and one low-rank inverse mass with
 `strategy.stiff_directions` stiff directions, each estimate from `strategy.stiff_draws` draws,
 for all chains. The MCLMC step size follows its energy error and is capped at the step size for
-which a harmonic mode of the median whitened curvature at positions of the warmup's records
-advances by the phase [`mclmc_cap_phase`](@ref) per step (`curvature_quantile = $(CAP_QUANTILE)`).
+which a harmonic mode of the $(CAP_QUANTILE) quantile of the whitened curvature at positions of
+the warmup's records advances by the phase [`mclmc_cap_phase`](@ref) per step.
 The MCLMC warmup sets its trajectory length from the autocorrelation times of the rows
 `strategy.trajectory_rows`, by their mean or their `strategy.trajectory_quantile` quantile, moves
 it by `strategy.refit_trajectory_step` after each refit, runs `strategy.window_iterations`
@@ -87,14 +88,12 @@ trend in it (see [`warn_trends`](@ref)). With `strategy.trajectory_length`, the 
 no window and the trajectory length is `strategy.trajectory_length` times √d, and with
 `strategy.step_size` MCLMC samples at that step size instead of the warmup's. After the MCLMC
 warmup, `KineticSamplers.measure_bias` estimates the bias of the sampling parameters from
-coupled runs of $(BIAS_STEPS) steps with one and two substeps (see [`bias_check`](@ref)). The
-latent coordinates of the scalar parameters and the directions of the inverse mass have the
-tolerance `strategy.bias_tolerance` standard deviations in a mean and `√2` times it in a
-variance, and the other coordinates the Monte Carlo errors at an effective sample size of
-$(BIAS_ESS). With
+coupled runs of $(BIAS_STEPS) steps with one and two substeps (see [`bias_check`](@ref)), whose
+tolerances are the Monte Carlo errors at an effective sample size of $(BIAS_ESS). With
 `strategy.bias_tuning`, `KineticSamplers.tune_step_size` reduces the step size until the
 estimates are within them, in at most $(BIAS_MAX_ROUNDS) rounds of coupled runs of up to
-$(BIAS_MAX_STEPS) steps, logging each round, and the warmup file holds the reduced step size.
+$(BIAS_MAX_STEPS) steps and at most $(BIAS_BUDGET) of the sampling's gradients (see
+[`bias_budget`](@ref)), logging each round, and the warmup file holds the reduced step size.
 Without it the estimate is logged, with a warning if it exceeds them, and sampling continues at
 the warmup's step size. Then $(MCLMC_CHECK_BLOCKS) blocks at the sampling parameters
 follow, whose energy statistics are logged per chain; if they fail
@@ -131,7 +130,7 @@ function sample_kinetic(out, post, xopt, strategy::FittingStrategy, rng; starts 
     )
     tb = Comrade.CoordinateView(post_cpu, space).tbase
     d = dimension(tb)
-    check = bias_check(strategy, scalar_coordinates(Comrade.maybe_transport(post_cpu, space)))
+    check = bias_check()
     target = KineticSamplers.Target(LatentTarget(tpost, d); backend = ADTypes.AutoReactant())
     alg, warmup_alg = kinetic_samplers(strategy, d)
     name = String(nameof(typeof(alg)))
@@ -269,7 +268,9 @@ function sample_kinetic(out, post, xopt, strategy::FittingStrategy, rng; starts 
         _log_warmup(alg, params, history, d, time() - t0)
         alg isa KineticSamplers.MCLMC && strategy.final > 0 && warn_trends(final_scalars)
         if alg isa KineticSamplers.MCLMC && strategy.bias_tuning
-            params, chains = _tune_step_size(rngs, target, alg, params, chains, d, check)
+            params, chains = _tune_step_size(
+                rngs, target, alg, params, chains, d, check, bias_budget(strategy)
+            )
         end
         host_params = _host_params(params)
         serialize(warmup_file, (; history, params = host_params))
@@ -442,16 +443,20 @@ end
 """
     mclmc_cap_phase(alg, strategy) -> Float64
 
-The phase per step, at the median whitened curvature, of the MCLMC warmup's step-size cap:
-`strategy.max_mode_phase`, or $(MCLACHLAN_CAP_PHASE) with McLachlan's integrator. Other
-integrators have no default and need `sampler.max_mode_phase`.
+The phase per step, at the $(CAP_QUANTILE) quantile of the whitened curvature, of the MCLMC
+warmup's step-size cap:
+`strategy.max_mode_phase`, the phase at which a harmonic mode's variance is within
+`strategy.max_mode_bias` of the target's (`KineticSamplers.mode_phase_for_bias`), or
+$(MCLACHLAN_CAP_PHASE) with McLachlan's integrator. Other integrators have no default.
 """
 function mclmc_cap_phase(alg, strategy)
     isnothing(strategy.max_mode_phase) || return strategy.max_mode_phase
+    isnothing(strategy.max_mode_bias) ||
+        return KineticSamplers.mode_phase_for_bias(alg.integrator, strategy.max_mode_bias)
     alg.integrator isa KineticSamplers.McLachlan && return MCLACHLAN_CAP_PHASE
     return error(
-        "sampler.max_mode_phase must be set for the integrator $(nameof(typeof(alg.integrator))): " *
-            "the default phase of the step-size cap, $(MCLACHLAN_CAP_PHASE) at the median curvature, applies to McLachlan's"
+        "sampler.max_mode_phase or sampler.max_mode_bias must be set for the integrator $(nameof(typeof(alg.integrator))): " *
+            "the default phase of the step-size cap, $(MCLACHLAN_CAP_PHASE) at the $(CAP_QUANTILE) quantile of the curvature, applies to McLachlan's"
     )
 end
 
@@ -588,8 +593,8 @@ function _log_warmup(::KineticSamplers.MCLMC, params, history, d, seconds)
         seconds, params.step_size, params.trajectory_length,
         params.trajectory_length / sqrt(d), size(params.inverse_mass.vecs, 2),
         isnothing(c) ? ", no step-size cap" : @sprintf(
-                ", step-size cap %.4g at the median curvature %.4g (0.99 quantile %.4g, max %.4g over %d positions)",
-                c.step_size_cap, c.curvature, c.p99, c.max, c.positions
+                ", step-size cap %.4g at the %.2g quantile curvature %.4g (median %.4g, max %.4g over %d positions)",
+                c.step_size_cap, CAP_QUANTILE, c.curvature, c.median, c.max, c.positions
             )
     )
     return nothing
@@ -607,49 +612,28 @@ function _bias_text(r, d)
 end
 
 _bias_tolerances(check) = @sprintf(
-    "the tolerances of %.3g sd in a mean or %.3g of a variance for the %d scalar coordinates and the inverse-mass directions, %.3g or %.3g elsewhere (Monte Carlo errors at ESS %d)",
-    check.focus_mean_bias, check.focus_variance_bias, length(check.focus), check.max_mean_bias,
-    check.max_variance_bias, BIAS_ESS
+    "the tolerances of %.3g sd in a mean or %.3g of a variance (Monte Carlo errors at ESS %d)",
+    check.max_mean_bias, check.max_variance_bias, BIAS_ESS
 )
 
 """
-    bias_check(strategy, focus) -> KineticSamplers.BiasCheck
+    bias_check() -> KineticSamplers.BiasCheck
 
 The bias check of an MCLMC run: coupled runs of $(BIAS_STEPS) steps, doubled up to
 $(BIAS_MAX_STEPS) while a round is undecided, with the Monte Carlo errors at an effective sample
-size of $(BIAS_ESS) as the tolerances of most coordinates, and for the latent coordinates `focus`
-and the directions of the inverse mass `strategy.bias_tolerance` standard deviations in a mean
-and `√2` times it in a variance.
+size of $(BIAS_ESS) as the tolerances.
 """
-function bias_check(strategy, focus)
-    t = strategy.bias_tolerance
-    return KineticSamplers.BiasCheck(;
-        steps = BIAS_STEPS, ess = BIAS_ESS, focus, focus_mean_bias = t,
-        focus_variance_bias = sqrt(2) * t, max_steps = BIAS_MAX_STEPS
-    )
-end
+bias_check() = KineticSamplers.BiasCheck(; steps = BIAS_STEPS, ess = BIAS_ESS, max_steps = BIAS_MAX_STEPS)
 
 """
-    scalar_coordinates(tpost) -> Vector{Int}
+    bias_budget(strategy) -> Int
 
-The latent coordinates of `tpost` that belong to parameters of at most $(SCALAR_BLOCK) latent
-coordinates, such as hyperparameters, as opposed to images and gain tables.
+The most coupled steps per chain the MCLMC step-size tuning runs in all: those whose three
+gradients each make up $(BIAS_BUDGET) of the gradients of sampling, `strategy.nsample` times
+`strategy.thin` times `strategy.chunk_size` steps per chain.
 """
-function scalar_coordinates(tpost)
-    return _scalar_coordinates!(Int[], PT.transport_node(tpost.transform), 0)
-end
-
-function _scalar_coordinates!(out, t, offset)
-    if t isa PT.TupleTransport
-        for c in getfield(t, :transports)
-            _scalar_coordinates!(out, c, offset)
-            offset += PT.dimension(c)
-        end
-    elseif PT.dimension(t) <= SCALAR_BLOCK
-        append!(out, offset .+ (1:PT.dimension(t)))
-    end
-    return out
-end
+bias_budget(strategy) =
+    max(1, floor(Int, BIAS_BUDGET * strategy.nsample * strategy.thin * strategy.chunk_size / 3))
 
 # Logs the bias of MCLMC at `params` from `KineticSamplers.measure_bias` with `check`, with a
 # warning if it exceeds the tolerances, and returns the chains it ran.
@@ -671,7 +655,7 @@ end
 
 # `params` with the step size of `KineticSamplers.tune_step_size` with `check`, logging each
 # round, and the chains it ran.
-function _tune_step_size(rngs, target, alg, params, chains, d, check)
+function _tune_step_size(rngs, target, alg, params, chains, d, check, max_total_steps)
     t0 = time()
     function report(r)
         @info @sprintf(
@@ -684,7 +668,8 @@ function _tune_step_size(rngs, target, alg, params, chains, d, check)
         return nothing
     end
     tuned, chains, rounds = KineticSamplers.tune_step_size(
-        rngs, target, alg, params, chains, check; report, max_rounds = BIAS_MAX_ROUNDS
+        rngs, target, alg, params, chains, check; report, max_rounds = BIAS_MAX_ROUNDS,
+        max_total_steps
     )
     @info @sprintf(
         "MCLMC step size %.4g from the bias tuning (warmup: %.4g) %s %s, after %d rounds (%.0f s)",

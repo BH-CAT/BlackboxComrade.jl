@@ -5,7 +5,7 @@ using Random
 using Serialization: deserialize
 using LinearAlgebra
 using Statistics: cov, mean
-using Distributions: Exponential, LogNormal, MvNormal, Normal, cdf, logpdf, quantile
+using Distributions: LogNormal, Normal, cdf, logpdf, quantile
 import Enzyme
 
 const EXDIR = normpath(joinpath(@__DIR__, "..", "examples"))
@@ -567,7 +567,7 @@ exconfig(f) = TOML.parsefile(joinpath(EXDIR, f))
         @test smc.final == round(Int, 0.2 * smc.nadapt)
         @test (smc.stiff_directions, smc.stiff_draws) == (32, 8)
         @test (smc.trajectory_rows, smc.trajectory_quantile) == ("projections", nothing)
-        @test (smc.refit_trajectory_step, smc.window_iterations) == (0.5, 2)
+        @test (smc.refit_trajectory_step, smc.window_iterations) == (1.0, 2)
         tuned = build_fitting_config(
             edited(
                 mc, "sampler", "final" => 0, "stiff_directions" => 16, "stiff_draws" => 4,
@@ -614,7 +614,7 @@ exconfig(f) = TOML.parsefile(joinpath(EXDIR, f))
         @test (mcl.max_step_halvings, mclw.max_step_halvings) == (0, 0)
         @test mcl.integrator === mclw.integrator === BlackboxComrade.KineticSamplers.McLachlan()
         @test mcl.max_error == 0.25
-        @test_throws "sampler.max_mode_phase must be set with sampler.integrator = \"baoab\"" build_fitting_config(edited(mc, "sampler", "integrator" => "baoab"))
+        @test_throws "sampler.max_mode_phase or sampler.max_mode_bias must be set with sampler.integrator = \"baoab\"" build_fitting_config(edited(mc, "sampler", "integrator" => "baoab"))
         baoab = build_fitting_config(edited(edited(edited(mc, "sampler", "integrator" => "baoab"), "sampler", "max_energy_error" => 0.8), "sampler", "max_mode_phase" => 0.4))
         @test (baoab.integrator, baoab.max_energy_error) == ("baoab", 0.8)
         bl, blw = BlackboxComrade.kinetic_samplers(baoab, 16)
@@ -635,7 +635,13 @@ exconfig(f) = TOML.parsefile(joinpath(EXDIR, f))
         @test BlackboxComrade.mclmc_cap_phase(mcl, build_fitting_config(mc)) == BlackboxComrade.MCLACHLAN_CAP_PHASE
         @test BlackboxComrade.mclmc_cap_phase(mcl, build_fitting_config(edited(mc, "sampler", "max_mode_phase" => 1.2))) == 1.2
         @test BlackboxComrade.mclmc_cap_phase(bl, baoab) == 0.4
-        @test_throws "sampler.max_mode_phase must be set for the integrator BAOAB" BlackboxComrade.mclmc_cap_phase(bl, build_fitting_config(mc))
+        @test_throws "sampler.max_mode_phase or sampler.max_mode_bias must be set for the integrator BAOAB" BlackboxComrade.mclmc_cap_phase(bl, build_fitting_config(mc))
+        biased = build_fitting_config(edited(mc, "sampler", "max_mode_bias" => 0.05))
+        @test biased.max_mode_bias == 0.05
+        @test BlackboxComrade.mclmc_cap_phase(mcl, biased) ≈ 1.606 atol = 1.0e-3
+        @test_throws "sampler.max_mode_phase and sampler.max_mode_bias both set the phase of the MCLMC step-size cap; set one" build_fitting_config(edited(mc, "sampler", "max_mode_phase" => 1.0, "max_mode_bias" => 0.05))
+        @test_throws "sampler.max_mode_bias must be a positive number, got 0" build_fitting_config(edited(mc, "sampler", "max_mode_bias" => 0))
+        @test_throws "sampler.max_mode_bias applies to sampler.algorithm = \"mclmc\" only, not \"walnuts\"" build_fitting_config(edited(wn, "sampler", "max_mode_bias" => 0.05))
         @test build_fitting_config(edited(mc, "sampler", "step_size" => 8.25)).step_size == 8.25
         @test isnothing(build_fitting_config(mc).step_size)
         @test_throws "sampler.step_size must be a positive number, got 0" build_fitting_config(edited(mc, "sampler", "step_size" => 0))
@@ -645,20 +651,13 @@ exconfig(f) = TOML.parsefile(joinpath(EXDIR, f))
         @test !build_fitting_config(edited(mc, "sampler", "step_size" => 8.25)).bias_tuning
         @test_throws "sampler.step_size and sampler.bias_tuning = true both set the MCLMC step size; set one" build_fitting_config(edited(mc, "sampler", "bias_tuning" => true, "step_size" => 8.25))
         @test_throws "sampler.bias_tuning applies to sampler.algorithm = \"mclmc\" only, not \"walnuts\"" build_fitting_config(edited(wn, "sampler", "bias_tuning" => true))
-        @test build_fitting_config(mc).bias_tolerance == 0.03
-        @test build_fitting_config(edited(mc, "sampler", "bias_tolerance" => 0.05)).bias_tolerance == 0.05
-        @test_throws "sampler.bias_tolerance must be a positive number, got 0" build_fitting_config(edited(mc, "sampler", "bias_tolerance" => 0))
-        @test_throws "sampler.bias_tolerance applies to sampler.algorithm = \"mclmc\" only, not \"walnuts\"" build_fitting_config(edited(wn, "sampler", "bias_tolerance" => 0.05))
-        check = BlackboxComrade.bias_check(build_fitting_config(mc), [1, 3])
-        @test check.focus == [1, 3] && check.focus_mean_bias == 0.03
-        @test check.focus_variance_bias ≈ sqrt(2) * 0.03
-        @test check.max_mean_bias == 0.1 && check.steps == 2000 && check.max_steps == 32000
-        # Parameters of at most 8 latent coordinates are scalar; a 20-pixel image is not.
-        tree = BlackboxComrade.PT.transport_node(
-            (a = Normal(), img = MvNormal(zeros(20), 1.0), b = (c = Exponential(), d = MvNormal(zeros(3), 1.0))),
-            BlackboxComrade.PT.StdNormal()
-        )
-        @test BlackboxComrade._scalar_coordinates!(Int[], tree, 0) == [1, 22, 23, 24, 25]
+        @test_throws "unknown key(s) [\"bias_tolerance\"] in [sampler]" build_fitting_config(edited(mc, "sampler", "bias_tolerance" => 0.05))
+        check = BlackboxComrade.bias_check()
+        @test isempty(check.focus) && check.max_mean_bias == 0.1 && check.max_variance_bias ≈ sqrt(2 / 100)
+        @test check.steps == 2000 && check.max_steps == 32000
+        # A quarter of the sampling's gradients, three per coupled step.
+        kept = build_fitting_config(edited(mc, "sampler", "nsample" => 600, "thin" => 5, "chunk_size" => 100))
+        @test BlackboxComrade.bias_budget(kept) == 25_000
         @test_throws "is not a KineticSamplers algorithm" BlackboxComrade.kinetic_samplers(build_fitting_config(cfg5), 16)
 
         mc["sampler"]["algorithm"] = "nuts"
@@ -1555,16 +1554,6 @@ exconfig(f) = TOML.parsefile(joinpath(EXDIR, f))
                     θ1 = θd[1]
                     θbad = BlackboxComrade.@set θ1.sky.mean.fwhm = 0.0
                     @test_throws "non-finite latent coordinates in sky.mean.fwhm" BB.check_start(posts, BB.PT.StdNormal(), θbad)
-
-                    # the latent coordinates of the scalar parameters, for the bias check
-                    sc = BB.scalar_coordinates(Comrade.maybe_transport(posts, BB.PT.StdNormal()))
-                    @test 0 < length(sc) < n && allunique(sc)
-                    θfw = BlackboxComrade.@set θ1.sky.mean.fwhm = 2 * θ1.sky.mean.fwhm
-                    @test only(findall(Comrade.inverse(tps, θfw) .!= us[1])) in sc
-                    rest = setdiff(1:n, sc)
-                    ub = copy(us[1])
-                    ub[rest] .+= 0.1
-                    @test BB.scalar_leaves(Comrade.transform(tps, ub)) == BB.scalar_leaves(Comrade.transform(tps, us[1]))
 
                     # real-line phase chains: the start re-wrap and the ±2π sheet move
                     xs1 = Comrade.transform(tps, us[1])
