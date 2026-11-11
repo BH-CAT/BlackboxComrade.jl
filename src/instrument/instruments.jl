@@ -460,7 +460,7 @@ end
 end
 
 """
-    feed_retarder_jones(θ, η, φ, δ) -> (j11, j21, j12, j22)
+    feed_retarder_jones(θ, η, δ, χ) -> (j11, j21, j12, j22)
 
 Jones matrix, in column-major order and the circular basis, of two linear probes behind a
 retarder, relative to an ideal quarter-wave plate. In the linear basis, with the rotation
@@ -468,22 +468,31 @@ retarder, relative to an ideal quarter-wave plate. In the linear basis, with the
 `a = θ - π/4` and `P = diag(e^{ib/2}, e^{-ib/2})` of retardance `b = π/2 + η`. The probes are the
 rows of
 
-    M = [ cos φ        sin φ
-         -sin(φ + δ)   cos(φ + δ) ]
+    M = [ cos χ                         i sin χ
+         -cos χ sin δ - i sin χ cos δ   cos χ cos δ - i sin χ sin δ ]
 
-feed 1 rotated by `φ` and feed 2 by `φ + δ`, so `δ` is their departure from orthogonality. A
-linear field `E` gives the voltages `M Q E`, so the Jones matrix is `Λ⁻¹ M Q T`, with `T` the
-circular-to-linear transform of Comrade's `CirBasis` and `Λ = diag(1, i)` the feed phases of the
-ideal plate, which the gains absorb. It is the identity at `θ = η = φ = δ = 0`. To first order
-its leakage is `d1 = J₁₂/J₁₁ = -η/2 + i(θ + φ)` and `d2 = J₂₁/J₂₂ = η/2 + i(θ + φ + δ)`: near
-the ideal plate `θ` and `φ` enter only as their sum, and `Re(d1 + d2)` is of second order.
+feed 1 along the first axis and feed 2 rotated by `δ` from orthogonal to it, each elliptical
+with ellipticity angle `χ` in the same sense: `cos χ` times its axis plus `i sin χ` times its axis
+turned by +π/2. A linear field `E` gives the voltages `M Q E`, so the Jones matrix is `Λ⁻¹ M Q T`, with `T` the circular-to-linear
+transform of Comrade's `CirBasis` and `Λ = diag(1, i)` the feed phases of the ideal plate, which
+the gains absorb. It is the identity at `θ = η = δ = χ = 0`. To first order its leakage is
+`d1 = J₁₂/J₁₁ = -η/2 - χ + iθ` and `d2 = J₂₁/J₂₂ = η/2 - χ + i(θ + δ)`: each parameter moves
+one of the four real directions of the two d-terms.
+
+A rotation of the whole receiver, plate and probes together, is not a parameter: it multiplies
+the Jones matrix on the right by `T⁻¹ R T`, which is diagonal in the circular basis, so to first
+order it is an R-L phase difference, which the gain ratio holds.
 """
-function feed_retarder_jones(θ, η, φ, δ)
+function feed_retarder_jones(θ, η, δ, χ)
     a, b = θ - π / 4, η + π / 2
     rot(t) = SMatrix{2, 2}(cos(t), sin(t), -sin(t), cos(t))
     z = zero(b)
     P = SMatrix{2, 2}(complex(cos(b / 2), sin(b / 2)), complex(z), complex(z), complex(cos(b / 2), -sin(b / 2)))
-    M = SMatrix{2, 2}(cos(φ), -sin(φ + δ), sin(φ), cos(φ + δ))
+    cχ, sχ = cos(χ), sin(χ)
+    M = SMatrix{2, 2}(
+        complex(cχ, zero(χ)), complex(-cχ * sin(δ), -sχ * cos(δ)),
+        complex(zero(χ), sχ), complex(cχ * cos(δ), -sχ * sin(δ))
+    )
     T = SMatrix{2, 2}(1, -im, 1, im) / sqrt(2)
     # Two factors per product: a product of three falls back to LinearAlgebra's `mul!`, which
     # Reactant cannot trace when the last factor is a constant static matrix.
@@ -496,23 +505,24 @@ end
 #
 # Leakage of two linear probes behind a retarder (`feed_retarder_jones`) with no other leakage
 # terms: the plate's fast-axis angle qwpθ and retardance qwpη (offsets from an ideal
-# quarter-wave plate), the probes' common rotation feedφ and their departure from
-# orthogonality feedδ, all in radians. Each is a per-station value over the track (qwpθμ, …,
-# typically `seg = "track"`) plus a residual about it (qwpθ, …, typically a zero-mean
-# stationary OU chain with a small σ and a long τ), as in `leakage_disk_offsets`. The Jones
-# matrix is in the circular basis, so it describes stations recorded in that basis: the
-# response (`JonesR`) before it changes the reference basis to the station's recorded basis.
+# quarter-wave plate), the probes' departure from orthogonality feedδ and their common
+# ellipticity feedχ, all in radians. Each
+# is a per-station value over the track (qwpθμ, …, typically `seg = "track"`) plus a residual
+# about it (qwpθ, …, typically a zero-mean stationary OU chain with a small σ and a long τ), as
+# in `leakage_disk_offsets`. The Jones matrix is in the circular basis, so it describes stations
+# recorded in that basis: the response (`JonesR`) before it changes the reference basis to the
+# station's recorded basis.
 @instrument function leakage_feed_retarder(; priors)
     return @jones begin
         qwpθμ ~ priors.qwpθμ
         qwpημ ~ priors.qwpημ
-        feedφμ ~ priors.feedφμ
         feedδμ ~ priors.feedδμ
+        feedχμ ~ priors.feedχμ
         qwpθ ~ priors.qwpθ
         qwpη ~ priors.qwpη
-        feedφ ~ priors.feedφ
         feedδ ~ priors.feedδ
-        return GenericJones(feed_retarder_jones(qwpθμ + qwpθ, qwpημ + qwpη, feedφμ + feedφ, feedδμ + feedδ))
+        feedχ ~ priors.feedχ
+        return GenericJones(feed_retarder_jones(qwpθμ + qwpθ, qwpημ + qwpη, feedδμ + feedδ, feedχμ + feedχ))
     end
 end
 
