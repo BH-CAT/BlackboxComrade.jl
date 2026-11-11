@@ -256,6 +256,27 @@ end
     end
 end
 
+#     gain_selfcal_offsets(; priors)
+#
+# `gain_selfcal` with the feed-1 amplitude split as in `gain_offsets`: lg1μ (per-track
+# constant log-amplitude, one value per site) + lg1 (a zero-mean stationary chain about it).
+# lg1μ holds each site's a-priori calibration offset, so a large constant offset is not forced
+# onto lg1's fitted σ. A common shift of every site's lg1μ trades exactly against the total
+# flux, so the lg1μ prior width sets the flux uncertainty.
+@instrument selfcal = true function gain_selfcal_offsets(; priors)
+    return @jones begin
+        lg1μ ~ priors.lg1μ     # amplitude: per-station constant log-amplitude (track)
+        lg1 ~ priors.lg1       # amplitude: zero-mean stationary chain about it
+        lgratμ ~ priors.lgratμ # ratio amplitude: per-station mean (OU cannot fit its own)
+        lgrat ~ priors.lgrat   # ratio amplitude: residual about that mean
+        gpratμ ~ priors.gpratμ # ratio phase: per-station WRAPPED offset (arbitrary, on circle)
+        gprat ~ priors.gprat   # ratio phase: mean-reverting circular drift about it
+        g1 = complex(exp(lg1μ + lg1))
+        g2 = g1 * exp(complex((lgratμ + lgrat), (gpratμ + gprat)))
+        return JonesG((g1, g2))
+    end
+end
+
 #     gain_offsets(; priors)
 #
 # `gain_offsetphase` with the feed-1 amplitude split the same way as its phase:
@@ -389,6 +410,122 @@ unitdisk(z) = z / sqrt(1 + abs2(z))
     end
 end
 
+"""
+    retarder_jones(δ, ε) -> (w11, w21, w12, w22)
+
+Jones matrix, in column-major order, of a retarder that converts linear feeds to circular:
+fast axis rotated by `δ` (radians) from its nominal 45° and retardance `π/2 + ε`. It is written
+in the circular basis and normalized so that it is the identity at `δ = ε = 0`:
+
+    W = [  cos(ε/2) - i a s e^{-iδ}    sin(ε/2) + i a s e^{iδ}
+          -sin(ε/2) + i a s e^{-iδ}    cos(ε/2) + i a s e^{iδ}  ]
+
+with `a = cos(ε/2) + sin(ε/2)` and `s = sin δ`; `det W = 1`. Its leakage `W₁₂/W₁₁`,
+`W₂₁/W₂₂` satisfies `D₂ = -conj(D₁)`, the two feeds staying orthogonal, and `|D| = tan δ` at
+`ε = 0`.
+"""
+function retarder_jones(δ, ε)
+    c, se = cos(ε / 2), sin(ε / 2)
+    as = (c + se) * sin(δ)
+    u = complex(as * sin(δ), as * cos(δ))     # i a s e^{-iδ}
+    v = complex(-as * sin(δ), as * cos(δ))    # i a s e^{iδ}
+    return (c - u, -se + u, se + v, c + v)
+end
+
+#     leakage_disk_offsets_retarder(; priors)
+#
+# `leakage_disk_offsets` times a retarder (`retarder_jones`): the station's leakage Jones
+# matrix is D·W, with D = [1 d1; d2 1] the `leakage_disk_offsets` leakage and W the retarder
+# rotated by `qwpδ` (radians) with retardance π/2 + `qwpε`. It describes a station whose
+# circular feeds are linear feeds behind a misaligned quarter-wave plate, with its other
+# leakage in D. qwpδ = qwpε = 0 gives `leakage_disk_offsets` exactly, so stations without a
+# plate pin both to 0.
+@instrument function leakage_disk_offsets_retarder(; priors)
+    return @jones begin
+        d1reμ ~ priors.d1reμ
+        d1imμ ~ priors.d1imμ
+        d2reμ ~ priors.d2reμ
+        d2imμ ~ priors.d2imμ
+        d1re ~ priors.d1re
+        d1im ~ priors.d1im
+        d2re ~ priors.d2re
+        d2im ~ priors.d2im
+        qwpδ ~ priors.qwpδ
+        qwpε ~ priors.qwpε
+        d1 = unitdisk(complex(d1reμ + d1re, d1imμ + d1im))
+        d2 = unitdisk(complex(d2reμ + d2re, d2imμ + d2im))
+        w11, w21, w12, w22 = retarder_jones(qwpδ, qwpε)
+        return GenericJones((w11 + d1 * w21, d2 * w11 + w21, w12 + d1 * w22, d2 * w12 + w22))
+    end
+end
+
+"""
+    feed_retarder_jones(θ, η, δ, χ) -> (j11, j21, j12, j22)
+
+Jones matrix, in column-major order and the circular basis, of two linear probes behind a
+retarder, relative to an ideal quarter-wave plate. In the linear basis, with the rotation
+`R(a) = [cos a  -sin a; sin a  cos a]`, the retarder is `Q = R(-a) P R(a)` with fast axis at
+`a = θ - π/4` and `P = diag(e^{ib/2}, e^{-ib/2})` of retardance `b = π/2 + η`. The probes are the
+rows of
+
+    M = [ cos χ                         i sin χ
+         -cos χ sin δ - i sin χ cos δ   cos χ cos δ - i sin χ sin δ ]
+
+feed 1 along the first axis and feed 2 rotated by `δ` from orthogonal to it, each elliptical
+with ellipticity angle `χ` in the same sense: `cos χ` times its axis plus `i sin χ` times its axis
+turned by +π/2. A linear field `E` gives the voltages `M Q E`, so the Jones matrix is `Λ⁻¹ M Q T`, with `T` the circular-to-linear
+transform of Comrade's `CirBasis` and `Λ = diag(1, i)` the feed phases of the ideal plate, which
+the gains absorb. It is the identity at `θ = η = δ = χ = 0`. To first order its leakage is
+`d1 = J₁₂/J₁₁ = -η/2 - χ + iθ` and `d2 = J₂₁/J₂₂ = η/2 - χ + i(θ + δ)`: each parameter moves
+one of the four real directions of the two d-terms.
+
+A rotation of the whole receiver, plate and probes together, is not a parameter: it multiplies
+the Jones matrix on the right by `T⁻¹ R T`, which is diagonal in the circular basis, so to first
+order it is an R-L phase difference, which the gain ratio holds.
+"""
+function feed_retarder_jones(θ, η, δ, χ)
+    a, b = θ - π / 4, η + π / 2
+    rot(t) = SMatrix{2, 2}(cos(t), sin(t), -sin(t), cos(t))
+    z = zero(b)
+    P = SMatrix{2, 2}(complex(cos(b / 2), sin(b / 2)), complex(z), complex(z), complex(cos(b / 2), -sin(b / 2)))
+    cχ, sχ = cos(χ), sin(χ)
+    M = SMatrix{2, 2}(
+        complex(cχ, zero(χ)), complex(-cχ * sin(δ), -sχ * cos(δ)),
+        complex(zero(χ), sχ), complex(cχ * cos(δ), -sχ * sin(δ))
+    )
+    T = SMatrix{2, 2}(1, -im, 1, im) / sqrt(2)
+    # Two factors per product: a product of three falls back to LinearAlgebra's `mul!`, which
+    # Reactant cannot trace when the last factor is a constant static matrix.
+    J = (M * ((rot(-a) * P) * rot(a))) * T
+    # Λ⁻¹ = diag(1, -i)
+    return (J[1, 1], -im * J[2, 1], J[1, 2], -im * J[2, 2])
+end
+
+#     leakage_feed_retarder(; priors)
+#
+# Leakage of two linear probes behind a retarder (`feed_retarder_jones`) with no other leakage
+# terms: the plate's fast-axis angle qwpθ and retardance qwpη (offsets from an ideal
+# quarter-wave plate), the probes' departure from orthogonality feedδ and their common
+# ellipticity feedχ, all in radians. Each
+# is a per-station value over the track (qwpθμ, …, typically `seg = "track"`) plus a residual
+# about it (qwpθ, …, typically a zero-mean stationary OU chain with a small σ and a long τ), as
+# in `leakage_disk_offsets`. The Jones matrix is in the circular basis, so it describes stations
+# recorded in that basis: the response (`JonesR`) before it changes the reference basis to the
+# station's recorded basis.
+@instrument function leakage_feed_retarder(; priors)
+    return @jones begin
+        qwpθμ ~ priors.qwpθμ
+        qwpημ ~ priors.qwpημ
+        feedδμ ~ priors.feedδμ
+        feedχμ ~ priors.feedχμ
+        qwpθ ~ priors.qwpθ
+        qwpη ~ priors.qwpη
+        feedδ ~ priors.feedδ
+        feedχ ~ priors.feedχ
+        return GenericJones(feed_retarder_jones(qwpθμ + qwpθ, qwpημ + qwpη, feedδμ + feedδ, feedχμ + feedχ))
+    end
+end
+
 #     leakage_hier(; priors)
 #
 # Hierarchical leakage: each feed's real/imaginary parts are given by a mean, a standard
@@ -425,6 +562,7 @@ const GAIN_SCHEMES = Dict{String, Any}(
     "gain_offsetphase" => gain_offsetphase,
     "gain_offsets" => gain_offsets,
     "gain_selfcal" => gain_selfcal,
+    "gain_selfcal_offsets" => gain_selfcal_offsets,
     "gain_centered" => gain_centered,
     "gain_hier" => gain_hier,
     "gain_noratio" => gain_noratio,
@@ -437,6 +575,8 @@ const LEAKAGE_SCHEMES = Dict{String, Any}(
     "leakage_hier" => leakage_hier,
     "leakage_disk" => leakage_disk,
     "leakage_disk_offsets" => leakage_disk_offsets,
+    "leakage_disk_offsets_retarder" => leakage_disk_offsets_retarder,
+    "leakage_feed_retarder" => leakage_feed_retarder,
 )
 
 const SEGMENTATIONS = Dict{String, Any}(

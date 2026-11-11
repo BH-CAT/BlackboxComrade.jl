@@ -102,6 +102,112 @@ exconfig(f) = TOML.parsefile(joinpath(EXDIR, f))
         @test_throws ErrorException assemble_instrument(cfg)
     end
 
+    @testset "leakage_disk_offsets_retarder" begin
+        @test BlackboxComrade.required_params(BlackboxComrade.LEAKAGE_SCHEMES["leakage_disk_offsets_retarder"]) ==
+            (:d1reμ, :d1imμ, :d2reμ, :d2imμ, :d1re, :d1im, :d2re, :d2im, :qwpδ, :qwpε)
+        W(δ, ε) = (w = BlackboxComrade.retarder_jones(δ, ε); [w[1] w[3]; w[2] w[4]])
+        @test W(0.0, 0.0) ≈ [1 0; 0 1]
+        # Independent construction: linear feeds behind a retarder with fast axis at θ and
+        # retardance r, in the circular basis, relative to the ideal plate (θ = π/4, r = π/2),
+        # up to the common phase e^{iε/2} that a feed-1 gain absorbs.
+        rot(t) = [cos(t) sin(t); -sin(t) cos(t)]
+        plate(θ, r) = rot(-θ) * [1 0; 0 cis(r)] * rot(θ)
+        C = [1 1; -im im] / sqrt(2)
+        J0 = plate(π / 4, π / 2) * C
+        for (δ, ε) in ((0.17, 0.0), (0.0, 0.2), (-0.35, 0.12), (0.6, -0.3))
+            Wd = W(δ, ε)
+            @test Wd ≈ cis(-ε / 2) * (J0 \ (plate(π / 4 + δ, π / 2 + ε) * C))
+            @test det(Wd) ≈ 1
+            D1, D2 = Wd[1, 2] / Wd[1, 1], Wd[2, 1] / Wd[2, 2]
+            @test D2 ≈ -conj(D1)
+            ε == 0 && @test abs(D1) ≈ tan(abs(δ))
+        end
+
+        # qwpδ = qwpε = 0 is leakage_disk_offsets exactly
+        x = (d1reμ = 0.1, d1imμ = -0.05, d2reμ = 0.02, d2imμ = 0.0, d1re = 0.01, d1im = 0.0, d2re = -0.02, d2im = 0.03)
+        d1, d2 = BlackboxComrade._leakage_disk_offsets_pmap_1(x)
+        j = BlackboxComrade._leakage_disk_offsets_retarder_pmap_1(merge(x, (qwpδ = 0.0, qwpε = 0.0)))
+        @test collect(j) ≈ [1, d2, d1, 1]
+        # otherwise D·W
+        j = BlackboxComrade._leakage_disk_offsets_retarder_pmap_1(merge(x, (qwpδ = 0.3, qwpε = -0.1)))
+        @test [j[1] j[3]; j[2] j[4]] ≈ [1 d1; d2 1] * W(0.3, -0.1)
+
+        # the plate terms pinned at 0 except at one station
+        cfg = exconfig("instrument_mixed.toml")
+        cfg["leakage"]["scheme"] = "leakage_disk_offsets_retarder"
+        for n in ("d1re", "d1im", "d2re", "d2im")
+            cfg["priors"][n * "μ"] = cfg["priors"][n]
+        end
+        site = "LM"
+        for n in ("qwpδ", "qwpε")
+            cfg["priors"][n] = Dict{String, Any}(
+                "seg" => "track", "dist" => Dict{String, Any}("dist" => "Normal", "args" => [0.0, 1.0]),
+                "init" => Dict{String, Any}("kind" => "fixed", "value" => 0.0),
+                "overrides" => Dict{String, Any}(
+                    site => Dict{String, Any}(
+                        "seg" => "track", "dist" => Dict{String, Any}("dist" => "Normal", "args" => [0.0, 0.5])
+                    ),
+                ),
+            )
+        end
+        intm = assemble_instrument(cfg)
+        @test intm isa InstrumentModel
+        @test all(n -> haskey(intm.prior, n), (:qwpδ, :qwpε))
+    end
+
+    @testset "leakage_feed_retarder" begin
+        BB = BlackboxComrade
+        @test BB.required_params(BB.LEAKAGE_SCHEMES["leakage_feed_retarder"]) ==
+            (:qwpθμ, :qwpημ, :feedδμ, :feedχμ, :qwpθ, :qwpη, :feedδ, :feedχ)
+        F(p...) = (j = BB.feed_retarder_jones(p...); [j[1] j[3]; j[2] j[4]])
+        @test F(0.0, 0.0, 0.0, 0.0) ≈ [1 0; 0 1]
+        # Independent construction from Comrade's circular basis: the voltages of linear probes
+        # at angles 0 and π/2 + δ, both elliptical by χ in the same sense about their own axes, behind
+        # a plate with fast axis at θ - π/4.
+        PT = BB.Comrade.ComradeBase.PolarizedTypes
+        T = Matrix(PT.basis_transform(PT.CirBasis() => PT.LinBasis()))
+        probe(t) = [cos(t) sin(t)]
+        plate(a, b) = (R = [cos(a) -sin(a); sin(a) cos(a)]; R' * Diagonal([cis(b / 2), cis(-b / 2)]) * R)
+        elliptic(t, χ) = cos(χ) * probe(t) + im * sin(χ) * probe(t + π / 2)
+        V(θ, η, δ, χ) = [elliptic(0, χ); elliptic(π / 2 + δ, χ)] * plate(θ - π / 4, π / 2 + η) * T
+        Λ = V(0, 0, 0, 0)
+        @test isdiag(round.(Λ; digits = 12))
+        for p in ((0.1, 0.0, 0.0, 0.0), (0.0, -0.2, 0.0, 0.0), (0.0, 0.0, 0.1, 0.0), (0.0, 0.0, 0.0, 0.1), (0.3, -0.1, -0.2, 0.15))
+            @test F(p...) ≈ Diagonal(Λ) \ V(p...)
+        end
+        # the fast axis at +π/4 instead of -π/4 swaps the hands
+        @test isdiag(round.(reverse(F(π / 2, 0.0, 0.0, 0.0); dims = 1); digits = 12))
+        # first-order leakage
+        θ, η, δ, χ = 1.0e-4 .* (3, -2, 4, 1)
+        J = F(θ, η, δ, χ)
+        @test J[1, 2] / J[1, 1] ≈ complex(-η / 2 - χ, θ) rtol = 1.0e-3
+        @test J[2, 1] / J[2, 2] ≈ complex(η / 2 - χ, θ + δ) rtol = 1.0e-3
+        # the four parameters move the four real directions of the two d-terms
+        lk(q) = (j = F(q...); d1 = j[1, 2] / j[1, 1]; d2 = j[2, 1] / j[2, 2]; [real(d1), imag(d1), real(d2), imag(d2)])
+        jac = reduce(hcat, [(lk(1.0e-6 .* (1:4 .== k)) - lk(-1.0e-6 .* (1:4 .== k))) / 2.0e-6 for k in 1:4])
+        @test rank(jac; rtol = 1.0e-6) == 4
+        # it traces under Reactant, as the runs use it
+        p = (0.3, -0.1, -0.2, 0.15)
+        jr = BlackboxComrade.Reactant.@jit BB.feed_retarder_jones(BB.Reactant.ConcreteRNumber.(p)...)
+        @test collect(map(x -> convert(ComplexF64, x), jr)) ≈ collect(BB.feed_retarder_jones(p...))
+        # the scheme sums the per-station values and the residuals
+        x = (qwpθμ = 0.1, qwpημ = -0.05, feedδμ = 0.03, feedχμ = -0.04, qwpθ = 0.01, qwpη = 0.0, feedδ = 0.02, feedχ = 0.01)
+        j = BB._leakage_feed_retarder_pmap_1(x)
+        @test [j[1] j[3]; j[2] j[4]] ≈ F(0.11, -0.05, 0.05, -0.03)
+
+        cfg = exconfig("instrument_mixed.toml")
+        cfg["leakage"]["scheme"] = "leakage_feed_retarder"
+        for n in ("qwpθ", "qwpη", "feedδ", "feedχ")
+            cfg["priors"][n * "μ"] = Dict{String, Any}(
+                "seg" => "track", "dist" => Dict{String, Any}("dist" => "Normal", "args" => [0.0, 0.1])
+            )
+            cfg["priors"][n] = cfg["priors"]["d1re"]
+        end
+        intm = assemble_instrument(cfg)
+        @test intm isa InstrumentModel
+        @test all(n -> haskey(intm.prior, n), (:qwpθμ, :qwpημ, :feedδμ, :feedχμ, :qwpθ, :qwpη, :feedδ, :feedχ))
+    end
+
     @testset "instrument assembler" begin
         intm = build_instrument_config(exconfig("instrument_mixed.toml"))
         @test intm isa InstrumentModel
@@ -125,6 +231,8 @@ exconfig(f) = TOML.parsefile(joinpath(EXDIR, f))
         intm = assemble_instrument(cfg)
         @test intm isa InstrumentModel && intm.selfcal
         @test !haskey(intm.prior, :gp1)
+        @test BlackboxComrade.required_params(BlackboxComrade.GAIN_SCHEMES["gain_selfcal_offsets"]) ==
+            (:lg1μ, :lg1, :lgratμ, :lgrat, :gpratμ, :gprat)
     end
 
     @testset "iid first-stamp pin (init)" begin
@@ -852,6 +960,17 @@ exconfig(f) = TOML.parsefile(joinpath(EXDIR, f))
         @test (nx == 63) && (ny == 63)
         # GMRF order 1 snaps to a product of small primes
         @test BlackboxComrade.snap_grid_size(GMRF, 1, 23, 23) == (24, 24)
+    end
+
+    @testset "refinespatial splits each pixel exactly" begin
+        g = imagepixels(μas2rad(9600.0), μas2rad(5400.0), 320, 180, μas2rad(3200.0), -μas2rad(1200.0))
+        r = refinespatial(g, 2)
+        @test size(r) == (640, 360)
+        @test step(r.X) ≈ step(g.X) / 2
+        @test step(r.Y) ≈ step(g.Y) / 2
+        # same field: the outer pixel edges do not move
+        @test first(r.X) - step(r.X) / 2 ≈ first(g.X) - step(g.X) / 2
+        @test last(r.Y) + step(r.Y) / 2 ≈ last(g.Y) + step(g.Y) / 2
     end
 
     @testset "Gaussian background mean with a fixed FWHM" begin
