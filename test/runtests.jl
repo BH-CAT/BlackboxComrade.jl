@@ -2,6 +2,7 @@ using BlackboxComrade
 using Test
 using TOML
 using Random
+using Serialization: deserialize
 using LinearAlgebra
 using Statistics: cov, mean
 using Distributions: LogNormal, Normal, cdf, logpdf, quantile
@@ -582,11 +583,46 @@ exconfig(f) = TOML.parsefile(joinpath(EXDIR, f))
         mc["sampler"]["chains"] = 2
         mc["sampler"]["max_step_halvings"] = 0
         @test (build_fitting_config(mc).chains, build_fitting_config(mc).max_step_halvings) == (2, 0)
+        @test build_fitting_config(mc).thin == 1
+        mc["sampler"]["thin"] = 10
+        @test build_fitting_config(mc).thin == 10
+        mc["sampler"]["thin"] = 0
+        @test_throws "sampler.thin must be at least 1, got 0" build_fitting_config(mc)
+        delete!(mc["sampler"], "thin")
         mc["sampler"]["chains"] = 0
         @test_throws "sampler.chains must be at least 1" build_fitting_config(mc)
         mc["sampler"]["chains"] = 2
         edited(c, section, edits...) = merge(c, Dict(section => merge(c[section], Dict(edits...))))
-        @test_throws "sampler.step_size applies to sampler.algorithm = \"nuts\" only, not \"mclmc\"" build_fitting_config(edited(mc, "sampler", "step_size" => 0.1))
+        smc = build_fitting_config(mc)
+        @test smc.final == round(Int, 0.2 * smc.nadapt)
+        @test (smc.stiff_directions, smc.stiff_draws) == (32, 8)
+        @test (smc.trajectory_rows, smc.trajectory_quantile) == ("all", nothing)
+        @test isnothing(smc.trajectory_factor)
+        @test (smc.refit_trajectory_step, smc.window_iterations) == (1.0, 2)
+        tuned = build_fitting_config(
+            edited(
+                mc, "sampler", "final" => 0, "stiff_directions" => 16, "stiff_draws" => 4,
+                "trajectory_rows" => "projections", "trajectory_quantile" => 0.9,
+                "trajectory_factor" => 0.5,
+                "refit_trajectory_step" => 0.25, "window_iterations" => 3
+            )
+        )
+        @test (tuned.final, tuned.stiff_directions, tuned.stiff_draws) == (0, 16, 4)
+        @test (tuned.trajectory_rows, tuned.trajectory_quantile, tuned.trajectory_factor) ==
+            ("projections", 0.9, 0.5)
+        @test build_fitting_config(edited(mc, "sampler", "trajectory_quantile" => "mean")).trajectory_quantile ==
+            "mean"
+        @test build_fitting_config(edited(mc, "sampler", "trajectory_quantile" => 1)).trajectory_quantile === 1.0
+        @test_throws "sampler.trajectory_factor must be a positive number, got 0" build_fitting_config(edited(mc, "sampler", "trajectory_factor" => 0))
+        @test (tuned.refit_trajectory_step, tuned.window_iterations) == (0.25, 3)
+        @test_throws "sampler.final must be nonnegative, got -1" build_fitting_config(edited(mc, "sampler", "final" => -1))
+        @test_throws "sampler.stiff_directions must be at least 1, got 0" build_fitting_config(edited(mc, "sampler", "stiff_directions" => 0))
+        @test_throws "sampler.stiff_draws must be at least 1, got 0" build_fitting_config(edited(mc, "sampler", "stiff_draws" => 0))
+        @test_throws "sampler.trajectory_rows must be \"all\" or \"projections\", got \"coordinates\"" build_fitting_config(edited(mc, "sampler", "trajectory_rows" => "coordinates"))
+        @test_throws "sampler.trajectory_quantile must be in [0, 1] or \"mean\", got 1.5" build_fitting_config(edited(mc, "sampler", "trajectory_quantile" => 1.5))
+        @test_throws "sampler.trajectory_quantile must be in [0, 1] or \"mean\", got \"median\"" build_fitting_config(edited(mc, "sampler", "trajectory_quantile" => "median"))
+        @test_throws "sampler.refit_trajectory_step must be in (0, 1], got 0.0" build_fitting_config(edited(mc, "sampler", "refit_trajectory_step" => 0.0))
+        @test_throws "sampler.window_iterations must be at least 1, got 0" build_fitting_config(edited(mc, "sampler", "window_iterations" => 0))
         @test_throws "sampler.max_tree_depth applies to sampler.algorithm = \"nuts\" or \"walnuts\" only" build_fitting_config(edited(mc, "sampler", "max_tree_depth" => 8))
         @test build_fitting_config(edited(mc, "run", "latent_space" => "flat")).latent_space == "flat"
         @test_throws "needs run.use_reactant = true" build_fitting_config(edited(mc, "run", "use_reactant" => false))
@@ -606,14 +642,71 @@ exconfig(f) = TOML.parsefile(joinpath(EXDIR, f))
         @test_throws "sampler.nsample = 105 must be a multiple of sampler.chunk_size = 10" build_fitting_config(edited(wn, "sampler", "nsample" => 105))
         @test_throws "sampler.chunk_size must be at least 1" build_fitting_config(edited(wn, "sampler", "chunk_size" => 0))
         @test_throws "sampler.max_step_halvings applies to sampler.algorithm = \"mclmc\" only, not \"walnuts\"" build_fitting_config(edited(wn, "sampler", "max_step_halvings" => 2))
-        @test_throws "sampler.step_size applies to sampler.algorithm = \"nuts\" only" build_fitting_config(edited(wn, "sampler", "step_size" => 0.1))
+        @test_throws "sampler.step_size applies to sampler.algorithm = \"nuts\" or \"mclmc\" only, not \"walnuts\"" build_fitting_config(edited(wn, "sampler", "step_size" => 0.1))
+        @test_throws "sampler.thin applies to sampler.algorithm = \"mclmc\" only, not \"walnuts\"" build_fitting_config(edited(wn, "sampler", "thin" => 2))
         @test_throws "sampler.algorithm = \"walnuts\" needs run.use_reactant = true" build_fitting_config(edited(wn, "run", "use_reactant" => false))
         @test build_fitting_config(edited(wn, "run", "latent_space" => "flat")).latent_space == "flat"
         @test_throws "run.warmup_checkpoint apply to NUTS only" build_fitting_config(edited(wn, "run", "warmup_checkpoint" => 10))
-        @test BlackboxComrade.kinetic_samplers(sw) == (BlackboxComrade.KineticSamplers.WALNUTS(), BlackboxComrade.KineticSamplers.WALNUTS())
-        mcl, mclw = BlackboxComrade.kinetic_samplers(build_fitting_config(mc))
+        @test BlackboxComrade.kinetic_samplers(sw, 16) == (BlackboxComrade.KineticSamplers.WALNUTS(), BlackboxComrade.KineticSamplers.WALNUTS())
+        mcl, mclw = BlackboxComrade.kinetic_samplers(build_fitting_config(mc), 16)
         @test (mcl.max_step_halvings, mclw.max_step_halvings) == (0, 0)
-        @test_throws "is not a KineticSamplers algorithm" BlackboxComrade.kinetic_samplers(build_fitting_config(cfg5))
+        @test mcl.integrator === mclw.integrator === BlackboxComrade.KineticSamplers.McLachlan()
+        @test mcl.max_error == 0.25
+        @test_throws "sampler.max_mode_phase or sampler.max_mode_bias must be set with sampler.integrator = \"baoab\"" build_fitting_config(edited(mc, "sampler", "integrator" => "baoab"))
+        baoab = build_fitting_config(edited(edited(edited(mc, "sampler", "integrator" => "baoab"), "sampler", "max_energy_error" => 0.8), "sampler", "max_mode_phase" => 0.4))
+        @test (baoab.integrator, baoab.max_energy_error) == ("baoab", 0.8)
+        bl, blw = BlackboxComrade.kinetic_samplers(baoab, 16)
+        @test bl.integrator === blw.integrator === BlackboxComrade.KineticSamplers.BAOAB()
+        @test bl.max_error == 0.8 / 4
+        @test blw.max_step_halvings == bl.max_step_halvings == baoab.max_step_halvings && blw.max_error == bl.max_error
+        @test build_fitting_config(edited(mc, "sampler", "max_mode_phase" => 0.6)).max_mode_phase == 0.6
+        @test isnothing(build_fitting_config(mc).max_mode_phase)
+        @test_throws "unknown key(s) [\"curvature_round\"] in [sampler]" build_fitting_config(edited(mc, "sampler", "curvature_round" => 0.05))
+        @test_throws "sampler.max_mode_phase must be a positive number" build_fitting_config(edited(mc, "sampler", "max_mode_phase" => -1))
+        @test_throws "sampler.integrator must be one of \"mclachlan\", \"leapfrog\", \"baoab\", got \"verlet\"" build_fitting_config(edited(mc, "sampler", "integrator" => "verlet"))
+        @test_throws "sampler.max_energy_error must be a positive number, got 0" build_fitting_config(edited(mc, "sampler", "max_energy_error" => 0))
+        @test_throws "sampler.integrator applies to sampler.algorithm = \"mclmc\" only, not \"walnuts\"" build_fitting_config(edited(wn, "sampler", "integrator" => "baoab"))
+        @test build_fitting_config(edited(mc, "sampler", "trajectory_length" => 40)).trajectory_length == 40.0
+        @test isnothing(build_fitting_config(mc).trajectory_length)
+        @test_throws "sampler.trajectory_length must be a positive number, got -1" build_fitting_config(edited(mc, "sampler", "trajectory_length" => -1))
+        @test_throws "sampler.trajectory_length applies to sampler.algorithm = \"mclmc\" only, not \"walnuts\"" build_fitting_config(edited(wn, "sampler", "trajectory_length" => 40))
+        @test BlackboxComrade.mclmc_cap_phase(mcl, build_fitting_config(mc)) == BlackboxComrade.MCLACHLAN_CAP_PHASE
+        @test BlackboxComrade.mclmc_cap_phase(mcl, build_fitting_config(edited(mc, "sampler", "max_mode_phase" => 1.2))) == 1.2
+        @test BlackboxComrade.mclmc_cap_phase(bl, baoab) == 0.4
+        @test_throws "sampler.max_mode_phase or sampler.max_mode_bias must be set for the integrator BAOAB" BlackboxComrade.mclmc_cap_phase(bl, build_fitting_config(mc))
+        biased = build_fitting_config(edited(mc, "sampler", "max_mode_bias" => 0.05))
+        @test biased.max_mode_bias == 0.05
+        @test BlackboxComrade.mclmc_cap_phase(mcl, biased) ≈ 1.606 atol = 1.0e-3
+        @test_throws "sampler.max_mode_phase and sampler.max_mode_bias both set the phase of the MCLMC step-size cap; set one" build_fitting_config(edited(mc, "sampler", "max_mode_phase" => 1.0, "max_mode_bias" => 0.05))
+        @test_throws "sampler.max_mode_bias must be a positive number, got 0" build_fitting_config(edited(mc, "sampler", "max_mode_bias" => 0))
+        @test_throws "sampler.max_mode_bias applies to sampler.algorithm = \"mclmc\" only, not \"walnuts\"" build_fitting_config(edited(wn, "sampler", "max_mode_bias" => 0.05))
+        @test build_fitting_config(edited(mc, "sampler", "step_size" => 8.25)).step_size == 8.25
+        @test isnothing(build_fitting_config(mc).step_size)
+        @test_throws "sampler.step_size must be a positive number, got 0" build_fitting_config(edited(mc, "sampler", "step_size" => 0))
+        @test_throws "sampler.step_size applies to sampler.algorithm = \"nuts\" or \"mclmc\" only, not \"walnuts\"" build_fitting_config(edited(wn, "sampler", "step_size" => 1.0))
+        @test !build_fitting_config(mc).bias_tuning
+        @test build_fitting_config(edited(mc, "sampler", "bias_tuning" => true)).bias_tuning
+        @test !build_fitting_config(edited(mc, "sampler", "step_size" => 8.25)).bias_tuning
+        @test_throws "sampler.step_size and sampler.bias_tuning = true both set the MCLMC step size; set one" build_fitting_config(edited(mc, "sampler", "bias_tuning" => true, "step_size" => 8.25))
+        @test_throws "sampler.bias_tuning applies to sampler.algorithm = \"mclmc\" only, not \"walnuts\"" build_fitting_config(edited(wn, "sampler", "bias_tuning" => true))
+        @test_throws "unknown key(s) [\"bias_tolerance\"] in [sampler]" build_fitting_config(edited(mc, "sampler", "bias_tolerance" => 0.05))
+        check = BlackboxComrade.bias_check()
+        @test isempty(check.focus) && check.max_mean_bias == 0.1 && check.max_variance_bias ≈ sqrt(2 / 100)
+        @test check.steps == 2000 && check.max_steps == 32000
+        # A quarter of the sampling's gradients, three per coupled step.
+        kept = build_fitting_config(edited(mc, "sampler", "nsample" => 600, "thin" => 5, "chunk_size" => 100))
+        @test BlackboxComrade.bias_budget(kept) == 25_000
+        worst = (; bias = 0.3, se = 0.1, monitored = 1)
+        r = (; worst_mean = worst, worst_variance = worst, unresolved_means = 0, unresolved_variances = 0, rejected = true)
+        text, warn = BlackboxComrade._bias_message(r, 5, check, String[], 1.0)
+        @test warn && occursin("so the draws are biased at least there", text)
+        text, warn = BlackboxComrade._bias_message(r, 5, check, ["sky.ρa[2]"], 1.0)
+        @test warn && !occursin("so the draws are biased", text) &&
+            occursin("the warmup ended with sky.ρa[2] still trending, so the chains may not have burned in", text)
+        text, warn = BlackboxComrade._bias_message((; r..., rejected = false), 5, check, ["sky.ρa[2]"], 1.0)
+        @test warn && !occursin("above", text) && occursin("may not have burned in", text)
+        @test !last(BlackboxComrade._bias_message((; r..., rejected = false), 5, check, String[], 1.0))
+        @test_throws "is not a KineticSamplers algorithm" BlackboxComrade.kinetic_samplers(build_fitting_config(cfg5), 16)
 
         mc["sampler"]["algorithm"] = "nuts"
         @test_throws "sampler.chains applies to sampler.algorithm = \"mclmc\" or \"walnuts\" only, not \"nuts\"" build_fitting_config(mc)
@@ -628,6 +721,52 @@ exconfig(f) = TOML.parsefile(joinpath(EXDIR, f))
         cfg6 = exconfig("fitting.toml")
         cfg6["dili"] = Dict{String, Any}()
         @test_throws "unknown key(s) [\"dili\"]" build_fitting_config(cfg6)
+    end
+
+    @testset "scalar parameters and the trajectory report" begin
+        BB = BlackboxComrade
+        θ = (; sky = (; σa = 1.0, ρa = (2.0, 3.0), a = zeros(20)), instrument = (; lg = (; hyper = (; τ = 4.0))))
+        @test BB.scalar_leaves(θ) == ["sky.σa" => 1.0, "sky.ρa[1]" => 2.0, "sky.ρa[2]" => 3.0, "instrument.lg.hyper.τ" => 4.0]
+        # An AR(1) parameter with τ = (1 + ρ) / (1 - ρ) = 39 draws, and white noise.
+        rng = Random.Xoshiro(3)
+        n, K, ρ = 20_000, 4, 0.95
+        X = zeros(2, n, K)
+        for k in 1:K
+            X[1, :, k] = randn(rng, n)
+            for j in 2:n
+                X[2, j, k] = ρ * X[2, j - 1, k] + sqrt(1 - ρ^2) * randn(rng)
+            end
+        end
+        path = joinpath(mktempdir(), "trajectory_report.toml")
+        # τ = 390 steps at 10 steps per draw; R = τ h / L = 7.8 at h = 1, L = 50.
+        @test_logs (:info, r"slow τ \d+ steps") BB.trajectory_report(path, ["fast", "slow"], X, 1.0, 50.0, 10, 100)
+        report = TOML.parsefile(path)
+        @test [p["name"] for p in report["parameters"]] == ["slow", "fast"]
+        @test isapprox(first(report["parameters"])["R"], 7.8; rtol = 0.25)
+        @test report["trajectory_length_sqrt_d"] == 5.0
+        @test !haskey(report, "suggested_trajectory_length_sqrt_d")
+        @test_throws DimensionMismatch BB.trajectory_report(path, ["fast"], X, 1.0, 50.0, 10, 100)
+    end
+
+    @testset "appending MCLMC draws" begin
+        BB = BlackboxComrade
+        root = mktempdir()
+        write_draws!(w, r) = (foreach(i -> BB.push_draw!(w, (sky = (σ = Float64(i),),); logp = -i), r); BB.flush_draws!(w))
+        dir = joinpath(root, "chain_1")
+        write_draws!(BB.ChainDrawWriter(dir), 1:20)
+        w = BB.ChainDrawWriter(dir)
+        @test (w.files, w.draws) == (2, 20)
+        write_draws!(w, 21:30)
+        @test [θ.sky.σ for θ in BB.Comrade.postsamples(BB.Comrade.load_samples(dir))] == 1:30
+        @test BB._written_draws([dir]) == 30
+        @test BB._written_draws([joinpath(root, "chain_9")]) == 0
+        write_draws!(BB.ChainDrawWriter(joinpath(root, "chain_2")), 1:10)
+        @test_throws "hold different numbers of draws, [30, 10]; sampling cannot resume" BB._written_draws([dir, joinpath(root, "chain_2")])
+        names, scalars = String[], [Vector{Float64}[]]
+        BB._read_scalars!(scalars, names, [dir], 25)
+        @test names == ["sky.σ"] && only.(only(scalars)) == 1:25
+        write_draws!(BB.ChainDrawWriter(joinpath(root, "chain_3")), 1:5)
+        @test_throws "draws can be appended only to full files of 10" BB.ChainDrawWriter(joinpath(root, "chain_3"))
     end
 
     @testset "KineticSamplers blocks and chain directories" begin
@@ -658,6 +797,8 @@ exconfig(f) = TOML.parsefile(joinpath(EXDIR, f))
             (; logp = -2.0, num_grads = 4, time = 2.0, divergent = 0, halved = 1),
             (; logp = -4.0, num_grads = 4, time = 2.0, divergent = 2, halved = 1),
         ]
+        a, b = only(mdraws)[2]
+        @test BB.merge_draw_stats(a, b) == (; logp = -4.0, num_grads = 8, time = 4.0, divergent = 2, halved = 2)
 
         out = mktempdir()
         @test_throws "no chains (chain_1, chain_2, …)" BB.load_kinetic_chains(out)
@@ -676,6 +817,22 @@ exconfig(f) = TOML.parsefile(joinpath(EXDIR, f))
         BB.push_draw!(w, (; x = [3, 1]); logp = -1)
         BB.flush_draws!(w)
         @test_throws "different numbers of draws" BB.load_kinetic_chains(out)
+
+        wdir = joinpath(mktempdir(), "warmup")
+        r = BB.WarmupRecord(wdir, 2)
+        for b in 1:4
+            BB.record_block!(r, (; phase = :adaptation, block = b, steps = 100b), 1.5b, [-b, -10b])
+        end
+        BB.record_positions!(r, (; phase = :adaptation, block = 4, steps = 400), [-4.0, -40.0], [(; x = [1, 4]), (; x = [2, 4])])
+        @test_throws DimensionMismatch BB.record_block!(r, (; phase = :window, block = 5, steps = 100), 7.5, [-5.0])
+        tr = deserialize(BB.write_trace(r))
+        @test tr.block == 1:4 && tr.steps == 100:100:400 && tr.seconds == 1.5:1.5:6.0
+        @test all(==(:adaptation), tr.phase)
+        @test tr.logp == [-1 -2 -3 -4; -10 -20 -30 -40]
+        @test !isfile(joinpath(wdir, "trace.jls.tmp"))
+        snap = BB.load_kinetic_chains(wdir)
+        @test Comrade.postsamples(snap)[1, 2].x == [2, 4]
+        @test Comrade.samplerstats(snap)[1, 2] == (; logp = -40.0, phase = :adaptation, block = 4, steps = 400)
     end
 
     @testset "sky config + grid snapping" begin

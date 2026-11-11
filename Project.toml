@@ -1,6 +1,6 @@
 name = "BlackboxComrade"
 uuid = "5bd28f6b-d16a-4ecc-8550-9c719f2b7021"
-version = "0.1.1"
+version = "0.1.2"
 authors = ["Paul Tiede <ptiede91@gmail.com> and contributors"]
 
 [deps]
@@ -60,7 +60,7 @@ Distributions = "0.25"
 Enzyme = "0.13.206"
 FINUFFT = "3"
 FillArrays = "1"
-KineticSamplers = "0.1"
+KineticSamplers = "0.1.1"
 LinearAlgebra = "1"
 LogDensityProblems = "2"
 Optimisers = "0.4.7"

@@ -19,9 +19,10 @@ Options (`--name value` or `--name=value`):
 
 Flags:
 
-  --restart            resume the run from a previously serialized optimum at `--outpath`
-                       instead of re-optimizing. This is a one-off action, deliberately not
-                       stored in any TOML.
+  --restart            resume the run at `--outpath`: start from its serialized optimum
+                       instead of re-optimizing, and continue its sampling (a NUTS
+                       checkpoint, or MCLMC chains from their last draws). This is a one-off
+                       action, deliberately not stored in any TOML.
   -h, --help           print this message
 """
 
@@ -33,8 +34,8 @@ const CLI_OPTIONS = (CLI_REQUIRED..., "outpath")
 
 Run [`image_from_toml`](@ref) from command-line arguments, as the `bbcomrade` app does: the
 four config paths are given with `--image`, `--instrument`, `--data` and `--fitting`, the
-output base with `--outpath` (default `Runs/run`), and `--restart` resumes from the
-serialized optimum there. `--help` prints the usage and returns `nothing`.
+output base with `--outpath` (default `Runs/run`), and `--restart` resumes the run there
+(see [`comrade_imager`](@ref)). `--help` prints the usage and returns `nothing`.
 """
 function bbcomrade(args)
     parsed = _parse_cli(args)
