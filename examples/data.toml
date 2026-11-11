@@ -25,6 +25,7 @@ keep_trange = []     # [] = all; or [lo, hi] UT decimal hours to restrict to at 
 [flags]
 corr_polbasis = []   # e.g. [{site = "HAY", R = "Y", L = "X"}]
 sites = []           # e.g. ["AP"] to drop all baselines to a site
+                     #   or [{site = "LM", tranges = [[5.7, 6.5]]}] to drop them only in UT windows
 baselines = []       # e.g. [["AA", "LM"]]
 drop_tranges = []    # e.g. [[4.5, 5.2]] UT decimal-hour windows to drop
 uvranges = []        # e.g. [[0.0, 1.0e8]] uv-distance windows (λ) to drop

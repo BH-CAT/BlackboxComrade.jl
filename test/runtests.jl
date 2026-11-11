@@ -546,6 +546,26 @@ exconfig(f) = TOML.parsefile(joinpath(EXDIR, f))
         )
     end
 
+    @testset "site flags" begin
+        flags = parse_flagtable(
+            Dict{String, Any}("sites" => Any["SR", Dict("site" => "LM", "tranges" => [[6.33, 6.45], [8.13, 8.25]])])
+        )
+        @test flags.sites[1] == (; site = :SR, tranges = [(-Inf, Inf)])
+        @test flags.sites[2] == (; site = :LM, tranges = [(6.33, 6.45), (8.13, 8.25)])
+        @test_throws "sites[1] must be a site string or {site, tranges} table" parse_flagtable(
+            Dict{String, Any}("sites" => Any[1])
+        )
+        @test_throws "sites[1] needs a 'site' and 'tranges'" parse_flagtable(
+            Dict{String, Any}("sites" => Any[Dict("site" => "LM")])
+        )
+        @test_throws "sites[1].tranges entries must be [a, b]" parse_flagtable(
+            Dict{String, Any}("sites" => Any[Dict("site" => "LM", "tranges" => [[6.3]])])
+        )
+        @test_throws ErrorException parse_flagtable(
+            Dict{String, Any}("sites" => Any[Dict("site" => "LM", "tranges" => [[6.3, 6.4]], "trange" => [6.3, 6.4])])
+        )
+    end
+
     @testset "restart resumes only a started sampler" begin
         out = mktempdir()
         @test !BlackboxComrade._resume_sampler(out, false)
@@ -1409,6 +1429,20 @@ exconfig(f) = TOML.parsefile(joinpath(EXDIR, f))
             @test isfinite(logdensityof(post, x0))
             xopt, _ = comrade_opt(post, BlackboxComrade.Adam(); initial_params = x0, maxiters = 5, g_tol = 0.1)
             @test isfinite(logdensityof(post, xopt))
+
+            @testset "flag a site in UT windows" begin
+                bl = datatable(dcoh).baseline
+                site = first(first(bl).sites)
+                ti = sort(unique(b.Ti for b in bl if site in b.sites))
+                window = (ti[2] - 1.0e-3, ti[2] + 1.0e-3)
+                flags = parse_flagtable(
+                    Dict{String, Any}("sites" => Any[Dict("site" => String(site), "tranges" => [collect(window)])])
+                )
+                hit(b) = site in b.sites && window[1] <= b.Ti <= window[2]
+                kept = datatable(apply_flagtable(dcoh, flags)).baseline
+                @test length(kept) == length(bl) - count(hit, bl) < length(bl)
+                @test !any(hit, kept)
+            end
 
             @testset "fix_scales: held optimization and field rescale" begin
                 icfg = exconfig("image.toml")

@@ -5,6 +5,7 @@
 # Supported keys (all optional):
 #   corr_polbasis = [{site = "HAY", R = "Y", L = "X"}]  # feed-by-feed corrections
 #   sites         = ["AP"]          # drop all baselines touching these sites
+#   sites         = [{site = "LM", tranges = [[5.7, 6.5]]}]   # ... only in these UT windows
 #   baselines     = [["AA","LM"]]   # drop these specific (order-independent) baselines
 #   drop_tranges  = [[4.5, 5.2]]    # drop datums with Ti in these UT-decimal-hour ranges
 #   uvranges      = [[0.0, 1.0e8]]  # drop datums with uvdist in these ranges (units: λ)
@@ -52,13 +53,27 @@ function _parse_corr_polbasis(entries)
     return corrections
 end
 
+function _parse_sites(entries)
+    return map(enumerate(entries)) do (i, entry)
+        entry isa AbstractString && return (; site = Symbol(entry), tranges = [(-Inf, Inf)])
+        entry isa AbstractDict || error("sites[$i] must be a site string or {site, tranges} table, got $entry")
+        check_config_keys(entry, ("site", "tranges"), "sites[$i]")
+        haskey(entry, "site") && haskey(entry, "tranges") || error("sites[$i] needs a 'site' and 'tranges'")
+        tranges = [Tuple(Float64.(t)) for t in entry["tranges"]]
+        for t in tranges
+            length(t) == 2 || error("flag table: sites[$i].tranges entries must be [a, b], got $t")
+        end
+        (; site = Symbol(entry["site"]), tranges)
+    end
+end
+
 function parse_flagtable(cfg::AbstractDict)
     check_config_keys(
         cfg, ("corr_polbasis", "sites", "baselines", "drop_tranges", "uvranges"),
         "the [flags] table"
     )
     sites_corr = _parse_corr_polbasis(get(cfg, "corr_polbasis", Any[]))
-    sites = Symbol.(get(cfg, "sites", String[]))
+    sites = _parse_sites(get(cfg, "sites", String[]))
     baselines = [Set(Symbol.(bl)) for bl in get(cfg, "baselines", Vector{String}[])]
     drop_tranges = [Tuple(Float64.(t)) for t in get(cfg, "drop_tranges", Vector{Float64}[])]
     uvranges = [Tuple(Float64.(u)) for u in get(cfg, "uvranges", Vector{Float64}[])]
@@ -97,10 +112,10 @@ function apply_flagtable(dvis, cfg)
         @info "corr_polbasis: $(correction.site) $(correction.mapping)"
         dvis = corr_polbasis(dvis, correction.site, correction.mapping)
     end
-    for s in cfg.sites
+    for (; site, tranges) in cfg.sites
         n0 = length(dvis)
-        dvis = flag(x -> s ∈ x.baseline.sites, dvis)
-        @info "  flag site=$s dropped $(n0 - length(dvis)) datums"
+        dvis = flag(x -> site ∈ x.baseline.sites && any(((a, b),) -> a <= x.baseline.Ti <= b, tranges), dvis)
+        @info "  flag site=$site tranges=$tranges dropped $(n0 - length(dvis)) datums"
     end
     for bl in cfg.baselines
         n0 = length(dvis)
