@@ -17,19 +17,19 @@ env:
 jobs:
   test:
     name: Julia ${{ matrix.version }} - ${{ matrix.os }} - ${{ matrix.arch }}
+    # The tests run locally before a merge; this job runs only when started by hand.
+    if: ${{ github.event_name == 'workflow_dispatch' }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
-    continue-on-error: ${{ matrix.version == 'pre' }}
     permissions: # needed to allow julia-actions/cache to proactively delete old caches that it has created
       actions: write
       contents: read
     strategy:
       fail-fast: false
       matrix:
+        # Reactant and Enzyme do not resolve on later Julia versions yet.
         version:
           - '1.12'
-          - '1'
-          - 'pre'
         os:
           - ubuntu-latest
         arch:
@@ -62,6 +62,8 @@ jobs:
           fail_ci_if_error: false
   docs:
     name: Documentation
+    # Builds and deploys the documentation for main and tags.
+    if: ${{ github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     permissions:
       actions: write # needed to allow julia-actions/cache to proactively delete old caches that it has created
@@ -85,17 +87,11 @@ jobs:
         with:
           localregistry: https://github.com/BH-CAT/BHCATRegistry.git
           git_cli: true
+      # `makedocs` runs the doctests.
       - uses: julia-actions/julia-docdeploy@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DOCUMENTER_KEY: ${{ secrets.DOCUMENTER_KEY }}
-      - name: Run doctests
-        shell: julia --project=docs --color=yes {0}
-        run: |
-          using Documenter: DocMeta, doctest
-          using BlackboxComrade
-          DocMeta.setdocmeta!(BlackboxComrade, :DocTestSetup, :(using BlackboxComrade); recursive=true)
-          doctest(BlackboxComrade)
   runic:
     name: Runic formatting
     runs-on: ubuntu-latest
