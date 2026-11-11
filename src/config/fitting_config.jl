@@ -3,6 +3,20 @@
 
 const KINETIC_ALGORITHMS = ("mclmc", "walnuts")
 const KINETIC_WARMUP = Dict("mclmc" => 150_000, "walnuts" => 1_000)
+const MCLMC_INTEGRATORS = ("mclachlan", "leapfrog", "baoab")
+
+function _mclmc_integrator_name(name)
+    name in MCLMC_INTEGRATORS || error(
+        "sampler.integrator must be one of $(join(repr.(MCLMC_INTEGRATORS), ", ")), got $(repr(name))"
+    )
+    return String(name)
+end
+
+function _positive_or_nothing(x, key)
+    isnothing(x) && return nothing
+    x isa Real && x > 0 || error("$key must be a positive number, got $(repr(x))")
+    return Float64(x)
+end
 const MOVE_KINDS = ("flux_gain", "field_scale", "rho_field", "mean_field", "phase_sheet", "chain_hyper")
 
 """
@@ -46,17 +60,52 @@ Base.@kwdef struct FittingStrategy
     noise_schedule::Vector{Float64} = [0.05, 0.025, 0.0]
     nsample::Int = 10_000
     nadapt::Int = 5_000
-    step_size::Float64 = 0.01
+    # NUTS's initial step size; for MCLMC the sampling step size, `nothing` keeping the warmup's.
+    step_size::Union{Nothing, Float64} = 0.01
     target_accept::Float64 = 0.9
     init_buffer::Int = 200
     term_buffer::Int = 500
     max_tree_depth::Int = 10
     chunk_size::Int = 100
+    # MCLMC: sampling blocks per kept draw
+    thin::Int = 1
+    # MCLMC: steps per chain of the warmup's final phase, run at the sampling parameters
+    final::Int = 0
+    # MCLMC and WALNUTS: stiff directions of the inverse mass and the draws each estimate uses
+    stiff_directions::Int = 32
+    stiff_draws::Int = 8
+    # MCLMC: the autocorrelation times the trajectory length follows, "all" recorded rows or
+    # "projections" onto the low-rank directions of the inverse mass
+    trajectory_rows::String = "all"
+    # MCLMC: the quantile of those times the trajectory length follows, or "mean" (`nothing`:
+    # KineticSamplers' default, the slowest row), the factor on the step size times that time
+    # (`nothing`: KineticSamplers' default), the fraction of the way each refit window moves it,
+    # and the number of final windows
+    trajectory_quantile::Union{Nothing, Float64, String} = nothing
+    trajectory_factor::Union{Nothing, Float64} = nothing
+    refit_trajectory_step::Float64 = 1.0
+    window_iterations::Int = 2
     # "nuts", or "mclmc" or "walnuts" for KineticSamplers chains with `chains` chains and a
     # pooled warmup
     algorithm::String = "nuts"
     chains::Int = 4
     max_step_halvings::Int = 3
+    # MCLMC's integrator: "mclachlan", "leapfrog" or "baoab".
+    integrator::String = "mclachlan"
+    # MCLMC halves a step whose energy error exceeds this, in total; `nothing` keeps
+    # KineticSamplers' default of 0.25 √d.
+    max_energy_error::Union{Nothing, Float64} = nothing
+    # The phase per step at the 0.99 quantile curvature of the MCLMC warmup's step-size cap; `nothing`
+    # is `MCLACHLAN_CAP_PHASE` for McLachlan (see `mclmc_cap_phase`).
+    max_mode_phase::Union{Nothing, Float64} = nothing
+    # The variance bias of a harmonic mode that sets that phase instead (see
+    # `KineticSamplers.mode_phase_for_bias`); `nothing` keeps the default phase.
+    max_mode_bias::Union{Nothing, Float64} = nothing
+    # MCLMC's trajectory length in units of √d; `nothing` sets it from the warmup's window.
+    trajectory_length::Union{Nothing, Float64} = nothing
+    # MCLMC samples at the step size of `KineticSamplers.tune_step_size` after the warmup;
+    # without it the warmup's bias is measured and logged only.
+    bias_tuning::Bool = false
     # Metropolis–Hastings moves run between sampler chunks or blocks (see `build_moves`).
     moves::Vector{MoveSpec} = MoveSpec[]
     # run
@@ -95,11 +144,40 @@ Parse a fitting-strategy TOML into a [`FittingStrategy`](@ref). Sections: `[opti
 `"mclmc"` or `"walnuts"`, which run `sampler.chains` chains of KineticSamplers MCLMC or WALNUTS
 (see [`sample_kinetic`](@ref)) and need `run.use_reactant = true`. `nadapt` is the warmup length per chain, in steps for
 MCLMC (default 150 000) and in draws for WALNUTS (default 1000), and `nsample` the draws kept
-per chain (default 1000). For MCLMC a draw is kept every `chunk_size` steps, and `max_step_halvings` (default 3) is the number of halvings
-of a step whose energy error is too large. For WALNUTS every draw is kept, `chunk_size`
+per chain (default 1000). For MCLMC a draw is kept every `thin` (default 1) blocks of
+`chunk_size` steps, so sampling runs `nsample * thin * chunk_size` steps per chain, and `max_step_halvings` (default 3) is the number of halvings
+of a step whose energy error is too large: above `max_energy_error` in total (default 0.25 √d,
+KineticSamplers' default). `integrator` is MCLMC's integrator: `"mclachlan"` (default),
+`"leapfrog"` or `"baoab"` (see `KineticSamplers.BAOAB`). `max_mode_phase` is the phase per step
+at the 0.99 quantile of the curvature of the MCLMC warmup's step-size cap (default 1.2 with
+McLachlan, which keeps a harmonic mode's variance within about 1%; see [`sample_kinetic`](@ref)).
+`max_mode_bias` sets that phase from the variance bias of a harmonic mode instead, such as 0.05
+for 5%, for McLachlan or leapfrog; leapfrog and BAOAB need one of the two. `final` (default 20% of
+`nadapt`) is the MCLMC steps per chain of the warmup's final phase, which runs after the
+trajectory length is set, at the capped step size and that trajectory length, so the chains
+settle at the sampling parameters before any draw is kept. `stiff_directions` (default 32) and
+`stiff_draws` (default 8) set the `KineticSamplers.StiffDirections` of the inverse mass of MCLMC
+and WALNUTS: the number of stiff directions it shrinks and the draws whose Hessians each
+estimate uses. For MCLMC, `trajectory_rows` (default `"all"`) is the rows of the warmup's windows
+whose autocorrelation times set the trajectory length: `"all"` every latent coordinate and the
+projections onto the low-rank directions of the inverse mass, `"projections"` the projections
+alone. `trajectory_quantile` (default 1, the slowest row) is the quantile of their
+autocorrelation times that sets it, or `"mean"` for their mean, and `trajectory_factor`
+(default 1, and 0.4 with the mean) is the factor on the step size times that time, both as in
+KineticSamplers' `PooledAdaptation`. `refit_trajectory_step` (default 1) is the
+fraction of the way, on a log scale, that each window after a refit moves the trajectory length
+toward its estimate, and `window_iterations` (default 2) is the number of windows after the
+adaptation, each starting at the trajectory length the one before gave. `trajectory_length`, in
+units of √d, fixes MCLMC's trajectory length, and the warmup then runs no window; left out, the
+windows set it. `step_size` fixes MCLMC's sampling step size; left out, the warmup's adapted
+step size is used. `bias_tuning` (default false) reduces the warmup's MCLMC step size until a
+coupled bias check passes (see [`sample_kinetic`](@ref)); without it the check runs once and is
+logged, and `bias_tuning = true` is an error with `step_size`. After sampling, the run logs and writes the
+autocorrelation times of the scalar parameters in units of the trajectory length (see
+[`trajectory_report`](@ref)). For WALNUTS every draw is kept, `chunk_size`
 (default 10) is the draws per sampling block, which must divide `nsample`, and `max_tree_depth`
-(default 10) is the most trajectory doublings. `step_size` and the run checkpoints are
-errors with either algorithm, as is `max_tree_depth` with MCLMC. `run.start` may also name the
+(default 10) is the most trajectory doublings. `step_size` is an error with WALNUTS, the run
+checkpoints are errors with either algorithm, and `max_tree_depth` is an error with MCLMC. `run.start` may also name the
 run base of an MCLMC or WALNUTS run (the directory holding its `chain_k`), whose chains' last
 draws start the chains one to one.
 
@@ -183,7 +261,10 @@ function build_fitting_config(cfg::AbstractDict)
         (
             "nsample", "nadapt", "step_size", "target_accept", "init_buffer",
             "term_buffer", "max_tree_depth", "chunk_size", "moves", "moves_per_chunk",
-            "algorithm", "chains", "max_step_halvings",
+            "algorithm", "chains", "max_step_halvings", "integrator", "max_energy_error",
+            "max_mode_phase", "max_mode_bias", "trajectory_length", "bias_tuning", "thin", "final",
+            "stiff_directions", "stiff_draws", "trajectory_rows", "trajectory_quantile",
+            "trajectory_factor", "refit_trajectory_step", "window_iterations",
         ),
         "[sampler]"
     )
@@ -237,8 +318,16 @@ function build_fitting_config(cfg::AbstractDict)
     )
     kinetic = algorithm in KINETIC_ALGORITHMS
     for (key, allowed) in (
-            "step_size" => ("nuts",), "max_tree_depth" => ("nuts", "walnuts"),
+            "step_size" => ("nuts", "mclmc"), "max_tree_depth" => ("nuts", "walnuts"),
             "chains" => KINETIC_ALGORITHMS, "max_step_halvings" => ("mclmc",),
+            "integrator" => ("mclmc",), "max_energy_error" => ("mclmc",),
+            "max_mode_phase" => ("mclmc",), "max_mode_bias" => ("mclmc",),
+            "trajectory_length" => ("mclmc",), "bias_tuning" => ("mclmc",), "thin" => ("mclmc",),
+            "final" => ("mclmc",), "trajectory_rows" => ("mclmc",),
+            "trajectory_quantile" => ("mclmc",), "trajectory_factor" => ("mclmc",),
+            "refit_trajectory_step" => ("mclmc",),
+            "window_iterations" => ("mclmc",),
+            "stiff_directions" => KINETIC_ALGORITHMS, "stiff_draws" => KINETIC_ALGORITHMS,
         )
         haskey(samp, key) && !(algorithm in allowed) && error(
             "sampler.$key applies to sampler.algorithm = $(join(repr.(allowed), " or ")) only, " *
@@ -258,9 +347,48 @@ function build_fitting_config(cfg::AbstractDict)
     nsample = Int(get(samp, "nsample", kinetic ? 1_000 : 10_000))
     chunk_size = Int(get(samp, "chunk_size", algorithm == "walnuts" ? 10 : 100))
     chunk_size >= 1 || error("sampler.chunk_size must be at least 1, got $chunk_size")
+    thin = Int(get(samp, "thin", 1))
+    thin >= 1 || error("sampler.thin must be at least 1, got $thin")
+    nadapt = Int(get(samp, "nadapt", get(KINETIC_WARMUP, algorithm, 5_000)))
+    final = Int(get(samp, "final", algorithm == "mclmc" ? round(Int, 0.2 * nadapt) : 0))
+    final >= 0 || error("sampler.final must be nonnegative, got $final")
+    stiff_directions = Int(get(samp, "stiff_directions", 32))
+    stiff_directions >= 1 ||
+        error("sampler.stiff_directions must be at least 1, got $stiff_directions")
+    stiff_draws = Int(get(samp, "stiff_draws", 8))
+    stiff_draws >= 1 || error("sampler.stiff_draws must be at least 1, got $stiff_draws")
+    trajectory_rows = String(get(samp, "trajectory_rows", "all"))
+    trajectory_rows in ("all", "projections") || error(
+        "sampler.trajectory_rows must be \"all\" or \"projections\", got $(repr(trajectory_rows))"
+    )
+    trajectory_quantile = get(samp, "trajectory_quantile", nothing)
+    isnothing(trajectory_quantile) || trajectory_quantile == "mean" ||
+        trajectory_quantile isa Real && 0 <= trajectory_quantile <= 1 || error(
+        "sampler.trajectory_quantile must be in [0, 1] or \"mean\", got $(repr(trajectory_quantile))"
+    )
+    trajectory_quantile isa Real && (trajectory_quantile = Float64(trajectory_quantile))
+    refit_trajectory_step = Float64(get(samp, "refit_trajectory_step", 1.0))
+    0 < refit_trajectory_step <= 1 ||
+        error("sampler.refit_trajectory_step must be in (0, 1], got $refit_trajectory_step")
+    window_iterations = Int(get(samp, "window_iterations", 2))
+    window_iterations >= 1 ||
+        error("sampler.window_iterations must be at least 1, got $window_iterations")
     (algorithm == "walnuts" && nsample % chunk_size != 0) && error(
         "sampler.nsample = $nsample must be a multiple of sampler.chunk_size = $chunk_size, " *
             "the WALNUTS draws per block"
+    )
+    integrator = _mclmc_integrator_name(get(samp, "integrator", "mclachlan"))
+    algorithm == "mclmc" && integrator != "mclachlan" && !haskey(samp, "max_mode_phase") &&
+        !haskey(samp, "max_mode_bias") && error(
+        "sampler.max_mode_phase or sampler.max_mode_bias must be set with sampler.integrator = " *
+            "$(repr(integrator)): the default phase of the MCLMC step-size cap applies to \"mclachlan\""
+    )
+    haskey(samp, "max_mode_phase") && haskey(samp, "max_mode_bias") && error(
+        "sampler.max_mode_phase and sampler.max_mode_bias both set the phase of the MCLMC step-size cap; set one"
+    )
+    bias_tuning = Bool(get(samp, "bias_tuning", false))
+    bias_tuning && haskey(samp, "step_size") && error(
+        "sampler.step_size and sampler.bias_tuning = true both set the MCLMC step size; set one"
     )
     return FittingStrategy(;
         opt_method = opt_method,
@@ -271,17 +399,44 @@ function build_fitting_config(cfg::AbstractDict)
         fix_scales = Symbol.(fix_scales),
         noise_schedule = Float64.(get(temp, "noise_schedule", [0.05, 0.025, 0.0])),
         nsample,
-        nadapt = Int(get(samp, "nadapt", get(KINETIC_WARMUP, algorithm, 5_000))),
-        step_size = Float64(get(samp, "step_size", 0.01)),
+        nadapt,
+        step_size = algorithm == "mclmc" ?
+            _positive_or_nothing(get(samp, "step_size", nothing), "sampler.step_size") :
+            Float64(get(samp, "step_size", 0.01)),
         target_accept = Float64(get(samp, "target_accept", 0.9)),
         init_buffer = Int(get(samp, "init_buffer", 200)),
         term_buffer = Int(get(samp, "term_buffer", 500)),
         max_tree_depth = Int(get(samp, "max_tree_depth", 10)),
         chunk_size,
+        thin,
+        final,
+        stiff_directions,
+        stiff_draws,
+        trajectory_rows,
+        trajectory_quantile,
+        trajectory_factor = _positive_or_nothing(
+            get(samp, "trajectory_factor", nothing), "sampler.trajectory_factor"
+        ),
+        refit_trajectory_step,
+        window_iterations,
         moves,
         algorithm,
         chains,
         max_step_halvings = Int(get(samp, "max_step_halvings", 3)),
+        integrator,
+        max_energy_error = _positive_or_nothing(
+            get(samp, "max_energy_error", nothing), "sampler.max_energy_error"
+        ),
+        max_mode_phase = _positive_or_nothing(
+            get(samp, "max_mode_phase", nothing), "sampler.max_mode_phase"
+        ),
+        max_mode_bias = _positive_or_nothing(
+            get(samp, "max_mode_bias", nothing), "sampler.max_mode_bias"
+        ),
+        trajectory_length = _positive_or_nothing(
+            get(samp, "trajectory_length", nothing), "sampler.trajectory_length"
+        ),
+        bias_tuning,
         latent_space = latent_space,
         use_reactant = use_reactant,
         device,

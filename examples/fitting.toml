@@ -28,9 +28,18 @@ term_buffer = 500
 #                        # (default 1000);
 #                        # MCLMC keeps one draw per chunk_size steps, WALNUTS every draw in
 #                        # blocks of chunk_size draws (default 10, must divide nsample).
-#                        # Drop step_size, and for MCLMC also max_tree_depth.
+#                        # Drop step_size (for MCLMC it fixes the sampling step
+#                        # size instead of the warmup's), and for MCLMC also max_tree_depth.
 # chains = 4             # MCLMC and WALNUTS only
 # max_step_halvings = 3  # MCLMC only
+# max_mode_phase = 1.2   # MCLMC only: phase per step at the 0.99 quantile curvature of the
+#                        # warmup's step-size cap (default 1.2 with McLachlan; it or
+#                        # max_mode_bias is required with other integrators)
+# max_mode_bias = 0.05   # MCLMC only, instead of max_mode_phase: the variance bias of a harmonic
+#                        # mode that sets the cap's phase (0.05 gives 1.6 with McLachlan)
+# bias_tuning = false    # MCLMC only: reduce the warmup's step size until a coupled bias
+#                        # check passes (default false: the check runs once and is logged;
+#                        # true is an error with step_size)
 # reactant-only knobs:
 max_tree_depth = 10      # also WALNUTS's most trajectory doublings
 chunk_size = 100
