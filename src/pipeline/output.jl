@@ -3,27 +3,6 @@
 # below, and caltables via Comrade's `plotcaltable` — so every run writes them with no
 # optional plotting backend to load.
 
-"""
-    refine_pixels(g, k::Integer) -> RectiGrid
-
-The 2-D grid `g` with each pixel split into `k × k` pixels: the same field of view, a pixel
-spacing of exactly `1/k` of `g`'s along each axis, and `g`'s executor, header and position
-angle. Square pixels stay square. (ComradeBase's `refinespatial` instead keeps the first and
-last pixel centers, which scales the spacing along an axis of `n` pixels by
-`(n - 1) / (k n - 1)`, a different factor for each axis when they differ in length.)
-"""
-function refine_pixels(g, k::Integer)
-    k >= 1 || throw(ArgumentError("refinement factor must be at least 1, got $k"))
-    ndims(g) == 2 || throw(ArgumentError("refine_pixels needs a 2-D image grid, got $(ndims(g)) dimensions"))
-    CB = Comrade.ComradeBase
-    # Pixel centers of the refined axis: the outer edges of `x`'s first and last pixels stay put.
-    fine(x) = (h = (k - 1) * step(x) / 2k; LinRange(first(x) - h, last(x) + h, k * length(x)))
-    return CB.RectiGrid(
-        (; X = fine(g.X), Y = fine(g.Y));
-        executor = CB.executor(g), header = CB.metadata(g), posang = CB.posang(g)
-    )
-end
-
 # Image plotting via CairoMakie (always available).
 function plot_image_png(path, img)
     p = imageviz(img)

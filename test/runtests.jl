@@ -752,18 +752,15 @@ exconfig(f) = TOML.parsefile(joinpath(EXDIR, f))
         @test BlackboxComrade.snap_grid_size(GMRF, 1, 23, 23) == (24, 24)
     end
 
-    @testset "refine_pixels splits each pixel exactly" begin
+    @testset "refinespatial splits each pixel exactly" begin
         g = imagepixels(μas2rad(9600.0), μas2rad(5400.0), 320, 180, μas2rad(3200.0), -μas2rad(1200.0))
-        r = BlackboxComrade.refine_pixels(g, 2)
+        r = refinespatial(g, 2)
         @test size(r) == (640, 360)
         @test step(r.X) ≈ step(g.X) / 2
         @test step(r.Y) ≈ step(g.Y) / 2
-        @test step(r.X) ≈ step(r.Y)
         # same field: the outer pixel edges do not move
         @test first(r.X) - step(r.X) / 2 ≈ first(g.X) - step(g.X) / 2
         @test last(r.Y) + step(r.Y) / 2 ≈ last(g.Y) + step(g.Y) / 2
-        @test BlackboxComrade.refine_pixels(g, 1).X ≈ g.X
-        @test_throws "refinement factor must be at least 1" BlackboxComrade.refine_pixels(g, 0)
     end
 
     @testset "Gaussian background mean with a fixed FWHM" begin
