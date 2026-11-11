@@ -154,6 +154,49 @@ exconfig(f) = TOML.parsefile(joinpath(EXDIR, f))
         @test all(n -> haskey(intm.prior, n), (:qwpδ, :qwpε))
     end
 
+    @testset "leakage_feed_retarder" begin
+        BB = BlackboxComrade
+        @test BB.required_params(BB.LEAKAGE_SCHEMES["leakage_feed_retarder"]) ==
+            (:qwpθμ, :qwpημ, :feedφμ, :feedδμ, :qwpθ, :qwpη, :feedφ, :feedδ)
+        F(p...) = (j = BB.feed_retarder_jones(p...); [j[1] j[3]; j[2] j[4]])
+        @test F(0.0, 0.0, 0.0, 0.0) ≈ [1 0; 0 1]
+        # Independent construction from Comrade's circular basis: the voltages of linear probes
+        # at angles φ and φ + π/2 + δ behind a plate with fast axis at θ - π/4.
+        PT = BB.Comrade.ComradeBase.PolarizedTypes
+        T = Matrix(PT.basis_transform(PT.CirBasis() => PT.LinBasis()))
+        probe(t) = [cos(t) sin(t)]
+        plate(a, b) = (R = [cos(a) -sin(a); sin(a) cos(a)]; R' * Diagonal([cis(b / 2), cis(-b / 2)]) * R)
+        V(θ, η, φ, δ) = [probe(φ); probe(φ + π / 2 + δ)] * plate(θ - π / 4, π / 2 + η) * T
+        Λ = V(0, 0, 0, 0)
+        @test isdiag(round.(Λ; digits = 12))
+        for p in ((0.1, 0.0, 0.0, 0.0), (0.0, -0.2, 0.0, 0.0), (0.0, 0.0, 0.05, 0.0), (0.0, 0.0, 0.0, 0.1), (0.3, -0.1, 0.05, -0.2))
+            @test F(p...) ≈ Diagonal(Λ) \ V(p...)
+        end
+        # the fast axis at +π/4 instead of -π/4 swaps the hands
+        @test isdiag(round.(reverse(F(π / 2, 0.0, 0.0, 0.0); dims = 1); digits = 12))
+        # first-order leakage
+        θ, η, φ, δ = 1.0e-4 .* (3, -2, 1, 4)
+        J = F(θ, η, φ, δ)
+        @test J[1, 2] / J[1, 1] ≈ complex(-η / 2, θ + φ) rtol = 1.0e-3
+        @test J[2, 1] / J[2, 2] ≈ complex(η / 2, θ + φ + δ) rtol = 1.0e-3
+        # the scheme sums the per-station values and the residuals
+        x = (qwpθμ = 0.1, qwpημ = -0.05, feedφμ = 0.02, feedδμ = 0.03, qwpθ = 0.01, qwpη = 0.0, feedφ = -0.01, feedδ = 0.02)
+        j = BB._leakage_feed_retarder_pmap_1(x)
+        @test [j[1] j[3]; j[2] j[4]] ≈ F(0.11, -0.05, 0.01, 0.05)
+
+        cfg = exconfig("instrument_mixed.toml")
+        cfg["leakage"]["scheme"] = "leakage_feed_retarder"
+        for n in ("qwpθ", "qwpη", "feedφ", "feedδ")
+            cfg["priors"][n * "μ"] = Dict{String, Any}(
+                "seg" => "track", "dist" => Dict{String, Any}("dist" => "Normal", "args" => [0.0, 0.1])
+            )
+            cfg["priors"][n] = cfg["priors"]["d1re"]
+        end
+        intm = assemble_instrument(cfg)
+        @test intm isa InstrumentModel
+        @test all(n -> haskey(intm.prior, n), (:qwpθμ, :qwpημ, :feedφμ, :feedδμ, :qwpθ, :qwpη, :feedφ, :feedδ))
+    end
+
     @testset "instrument assembler" begin
         intm = build_instrument_config(exconfig("instrument_mixed.toml"))
         @test intm isa InstrumentModel
