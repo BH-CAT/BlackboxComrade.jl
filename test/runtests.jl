@@ -179,6 +179,10 @@ exconfig(f) = TOML.parsefile(joinpath(EXDIR, f))
         J = F(θ, η, φ, δ)
         @test J[1, 2] / J[1, 1] ≈ complex(-η / 2, θ + φ) rtol = 1.0e-3
         @test J[2, 1] / J[2, 2] ≈ complex(η / 2, θ + φ + δ) rtol = 1.0e-3
+        # it traces under Reactant, as the runs use it
+        p = (0.3, -0.1, 0.05, -0.2)
+        jr = BlackboxComrade.Reactant.@jit BB.feed_retarder_jones(BB.Reactant.ConcreteRNumber.(p)...)
+        @test collect(map(x -> convert(ComplexF64, x), jr)) ≈ collect(BB.feed_retarder_jones(p...))
         # the scheme sums the per-station values and the residuals
         x = (qwpθμ = 0.1, qwpημ = -0.05, feedφμ = 0.02, feedδμ = 0.03, qwpθ = 0.01, qwpη = 0.0, feedφ = -0.01, feedδ = 0.02)
         j = BB._leakage_feed_retarder_pmap_1(x)

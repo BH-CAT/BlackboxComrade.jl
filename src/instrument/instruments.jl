@@ -485,7 +485,9 @@ function feed_retarder_jones(θ, η, φ, δ)
     P = SMatrix{2, 2}(complex(cos(b / 2), sin(b / 2)), complex(z), complex(z), complex(cos(b / 2), -sin(b / 2)))
     M = SMatrix{2, 2}(cos(φ), -sin(φ + δ), sin(φ), cos(φ + δ))
     T = SMatrix{2, 2}(1, -im, 1, im) / sqrt(2)
-    J = M * (rot(-a) * P * rot(a)) * T
+    # Two factors per product: a product of three falls back to LinearAlgebra's `mul!`, which
+    # Reactant cannot trace when the last factor is a constant static matrix.
+    J = (M * ((rot(-a) * P) * rot(a))) * T
     # Λ⁻¹ = diag(1, -i)
     return (J[1, 1], -im * J[2, 1], J[1, 2], -im * J[2, 2])
 end
