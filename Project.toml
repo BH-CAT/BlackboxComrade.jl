@@ -1,6 +1,6 @@
 name = "BlackboxComrade"
 uuid = "5bd28f6b-d16a-4ecc-8550-9c719f2b7021"
-version = "0.1.2"
+version = "0.1.3"
 authors = ["Paul Tiede <ptiede91@gmail.com> and contributors"]
 
 [deps]
