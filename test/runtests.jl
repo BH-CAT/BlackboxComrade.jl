@@ -1,5 +1,6 @@
 using BlackboxComrade
 using Test
+import Logging
 using TOML
 using Random
 using Serialization: deserialize
@@ -895,6 +896,18 @@ exconfig(f) = TOML.parsefile(joinpath(EXDIR, f))
         @test names == ["sky.σ"] && only.(only(scalars)) == 1:25
         write_draws!(BB.ChainDrawWriter(joinpath(root, "chain_3")), 1:5)
         @test_throws "draws can be appended only to full files of 10" BB.ChainDrawWriter(joinpath(root, "chain_3"))
+    end
+
+    @testset "the app logger forwards to the wrapped logger" begin
+        io = IOBuffer()
+        logger = BlackboxComrade.FlushingLogger(Logging.ConsoleLogger(io, Logging.Info))
+        Logging.with_logger(logger) do
+            @info "kept"
+            @debug "dropped"
+        end
+        out = String(take!(io))
+        @test occursin("kept", out)
+        @test !occursin("dropped", out)
     end
 
     @testset "KineticSamplers blocks and chain directories" begin
