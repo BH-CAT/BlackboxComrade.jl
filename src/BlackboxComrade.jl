@@ -14,6 +14,7 @@ using Enzyme
 using LinearAlgebra
 using Random
 using Printf
+using Logging: Logging, AbstractLogger, current_logger, with_logger
 using Serialization
 using Dates: Dates
 using TOML

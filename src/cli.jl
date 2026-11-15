@@ -86,8 +86,24 @@ function _split_option(s)
     return s[1:prevind(s, k)], true, s[nextind(s, k):end]
 end
 
+# Forwards to `logger` and flushes stdout and stderr after each message: Julia buffers both
+# when they are redirected to a file, which would otherwise stay empty until the run ends.
+struct FlushingLogger{L <: AbstractLogger} <: AbstractLogger
+    logger::L
+end
+
+Logging.min_enabled_level(l::FlushingLogger) = Logging.min_enabled_level(l.logger)
+Logging.shouldlog(l::FlushingLogger, args...) = Logging.shouldlog(l.logger, args...)
+Logging.catch_exceptions(l::FlushingLogger) = Logging.catch_exceptions(l.logger)
+function Logging.handle_message(l::FlushingLogger, args...; kwargs...)
+    Logging.handle_message(l.logger, args...; kwargs...)
+    flush(stdout)
+    flush(stderr)
+    return nothing
+end
+
 # The entry point of the `bbcomrade` app (`julia -m BlackboxComrade`).
 function (@main)(args)
-    bbcomrade(args)
+    with_logger(() -> bbcomrade(args), FlushingLogger(current_logger()))
     return 0
 end
