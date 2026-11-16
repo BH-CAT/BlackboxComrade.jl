@@ -820,7 +820,20 @@ exconfig(f) = TOML.parsefile(joinpath(EXDIR, f))
         @test_throws "unknown key(s) [\"bias_tolerance\"] in [sampler]" build_fitting_config(edited(mc, "sampler", "bias_tolerance" => 0.05))
         check = BlackboxComrade.bias_check()
         @test isempty(check.focus) && check.max_mean_bias == 0.1 && check.max_variance_bias ≈ sqrt(2 / 100)
-        @test check.steps == 2000 && check.max_steps == 32000
+        @test check.steps == 2000 && check.max_steps == 32000 && check.batch == 250
+        @test build_fitting_config(mc).bias_steps == 2000
+        @test build_fitting_config(edited(mc, "sampler", "bias_steps" => 0)).bias_steps == 0
+        @test build_fitting_config(edited(mc, "sampler", "bias_steps" => 750)).bias_steps == 750
+        @test BlackboxComrade.bias_check(750).steps == 750 && BlackboxComrade.bias_check(750).max_steps == 12_000
+        @test_throws "sampler.bias_steps must be 0 or a multiple of 250 of at least 500, got 300" build_fitting_config(
+            edited(mc, "sampler", "bias_steps" => 300)
+        )
+        @test_throws "sampler.bias_tuning = true runs the bias check, which sampler.bias_steps = 0 skips; set one" build_fitting_config(
+            edited(mc, "sampler", "bias_tuning" => true, "bias_steps" => 0)
+        )
+        @test_throws "sampler.bias_steps applies to sampler.algorithm = \"mclmc\" only, not \"walnuts\"" build_fitting_config(
+            edited(wn, "sampler", "bias_steps" => 500)
+        )
         # A quarter of the sampling's gradients, three per coupled step.
         kept = build_fitting_config(edited(mc, "sampler", "nsample" => 600, "thin" => 5, "chunk_size" => 100))
         @test BlackboxComrade.bias_budget(kept) == 25_000

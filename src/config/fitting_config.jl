@@ -4,6 +4,10 @@
 const KINETIC_ALGORITHMS = ("mclmc", "walnuts")
 const KINETIC_WARMUP = Dict("mclmc" => 150_000, "walnuts" => 1_000)
 const MCLMC_INTEGRATORS = ("mclachlan", "leapfrog", "baoab")
+# The MCLMC bias check after the warmup: coupled runs of `BIAS_STEPS` steps by default, in
+# batches of `BIAS_BATCH` steps.
+const BIAS_STEPS = 2000
+const BIAS_BATCH = 250
 
 function _mclmc_integrator_name(name)
     name in MCLMC_INTEGRATORS || error(
@@ -106,6 +110,8 @@ Base.@kwdef struct FittingStrategy
     # MCLMC samples at the step size of `KineticSamplers.tune_step_size` after the warmup;
     # without it the warmup's bias is measured and logged only.
     bias_tuning::Bool = false
+    # MCLMC: steps of the coupled runs of the bias check after the warmup; 0 skips the check.
+    bias_steps::Int = BIAS_STEPS
     # Metropolis–Hastings moves run between sampler chunks or blocks (see `build_moves`).
     moves::Vector{MoveSpec} = MoveSpec[]
     # run
@@ -170,9 +176,12 @@ toward its estimate, and `window_iterations` (default 2) is the number of window
 adaptation, each starting at the trajectory length the one before gave. `trajectory_length`, in
 units of √d, fixes MCLMC's trajectory length, and the warmup then runs no window; left out, the
 windows set it. `step_size` fixes MCLMC's sampling step size; left out, the warmup's adapted
-step size is used. `bias_tuning` (default false) reduces the warmup's MCLMC step size until a
+step size is used. `bias_steps` (default $(BIAS_STEPS)) is the steps of the coupled runs of the
+MCLMC bias check after the warmup, a multiple of $(BIAS_BATCH) of at least $(2 * BIAS_BATCH), or 0
+to skip the check. `bias_tuning` (default false) reduces the warmup's MCLMC step size until a
 coupled bias check passes (see [`sample_kinetic`](@ref)); without it the check runs once and is
-logged, and `bias_tuning = true` is an error with `step_size`. After sampling, the run logs and writes the
+logged, and `bias_tuning = true` is an error with `step_size` or with `bias_steps = 0`. After
+sampling, the run logs and writes the
 autocorrelation times of the scalar parameters in units of the trajectory length (see
 [`trajectory_report`](@ref)). For WALNUTS every draw is kept, `chunk_size`
 (default 10) is the draws per sampling block, which must divide `nsample`, and `max_tree_depth`
@@ -262,7 +271,8 @@ function build_fitting_config(cfg::AbstractDict)
             "nsample", "nadapt", "step_size", "target_accept", "init_buffer",
             "term_buffer", "max_tree_depth", "chunk_size", "moves", "moves_per_chunk",
             "algorithm", "chains", "max_step_halvings", "integrator", "max_energy_error",
-            "max_mode_phase", "max_mode_bias", "trajectory_length", "bias_tuning", "thin", "final",
+            "max_mode_phase", "max_mode_bias", "trajectory_length", "bias_tuning", "bias_steps",
+            "thin", "final",
             "stiff_directions", "stiff_draws", "trajectory_rows", "trajectory_quantile",
             "trajectory_factor", "refit_trajectory_step", "window_iterations",
         ),
@@ -322,7 +332,8 @@ function build_fitting_config(cfg::AbstractDict)
             "chains" => KINETIC_ALGORITHMS, "max_step_halvings" => ("mclmc",),
             "integrator" => ("mclmc",), "max_energy_error" => ("mclmc",),
             "max_mode_phase" => ("mclmc",), "max_mode_bias" => ("mclmc",),
-            "trajectory_length" => ("mclmc",), "bias_tuning" => ("mclmc",), "thin" => ("mclmc",),
+            "trajectory_length" => ("mclmc",), "bias_tuning" => ("mclmc",),
+            "bias_steps" => ("mclmc",), "thin" => ("mclmc",),
             "final" => ("mclmc",), "trajectory_rows" => ("mclmc",),
             "trajectory_quantile" => ("mclmc",), "trajectory_factor" => ("mclmc",),
             "refit_trajectory_step" => ("mclmc",),
@@ -390,6 +401,14 @@ function build_fitting_config(cfg::AbstractDict)
     bias_tuning && haskey(samp, "step_size") && error(
         "sampler.step_size and sampler.bias_tuning = true both set the MCLMC step size; set one"
     )
+    bias_steps = Int(get(samp, "bias_steps", BIAS_STEPS))
+    bias_steps == 0 || (bias_steps >= 2 * BIAS_BATCH && bias_steps % BIAS_BATCH == 0) || error(
+        "sampler.bias_steps must be 0 or a multiple of $BIAS_BATCH of at least $(2 * BIAS_BATCH), " *
+            "got $bias_steps"
+    )
+    bias_tuning && bias_steps == 0 && error(
+        "sampler.bias_tuning = true runs the bias check, which sampler.bias_steps = 0 skips; set one"
+    )
     return FittingStrategy(;
         opt_method = opt_method,
         maxiters = Int(get(opt, "maxiters", 10_000)),
@@ -437,6 +456,7 @@ function build_fitting_config(cfg::AbstractDict)
             get(samp, "trajectory_length", nothing), "sampler.trajectory_length"
         ),
         bias_tuning,
+        bias_steps,
         latent_space = latent_space,
         use_reactant = use_reactant,
         device,

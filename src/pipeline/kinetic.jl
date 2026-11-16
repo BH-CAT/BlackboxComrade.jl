@@ -13,8 +13,7 @@ const TRAJECTORY_REPORTED = 5
 const CAP_QUANTILE = 0.99
 const MCLACHLAN_CAP_PHASE = 1.2
 const BIAS_ESS = 100
-const BIAS_STEPS = 2000
-const BIAS_MAX_STEPS = 16 * BIAS_STEPS
+const BIAS_MAX_FACTOR = 16
 const BIAS_MAX_ROUNDS = 10
 const BIAS_BUDGET = 0.25
 const FINAL_TREND_BLOCKS = 5
@@ -89,11 +88,13 @@ trend in it (see [`warn_trends`](@ref)). With `strategy.trajectory_length`, the 
 no window and the trajectory length is `strategy.trajectory_length` times √d, and with
 `strategy.step_size` MCLMC samples at that step size instead of the warmup's. After the MCLMC
 warmup, `KineticSamplers.measure_bias` estimates the bias of the sampling parameters from
-coupled runs of $(BIAS_STEPS) steps with one and two substeps (see [`bias_check`](@ref)), whose
-tolerances are the Monte Carlo errors at an effective sample size of $(BIAS_ESS). With
+coupled runs of `strategy.bias_steps` steps with one and two substeps (see
+[`bias_check`](@ref)), whose tolerances are the Monte Carlo errors at an effective sample size
+of $(BIAS_ESS); `strategy.bias_steps = 0` skips it. With
 `strategy.bias_tuning`, `KineticSamplers.tune_step_size` reduces the step size until the
 estimates are within them, in at most $(BIAS_MAX_ROUNDS) rounds of coupled runs of up to
-$(BIAS_MAX_STEPS) steps and at most $(BIAS_BUDGET) of the sampling's gradients (see
+$(BIAS_MAX_FACTOR) times `strategy.bias_steps` steps and at most $(BIAS_BUDGET) of the
+sampling's gradients (see
 [`bias_budget`](@ref)), logging each round, and the warmup file holds the reduced step size.
 Without it the estimate is logged, with a warning if some estimate exceeds its tolerance by more
 than its margin of standard errors, and sampling continues at the warmup's step size. Then $(MCLMC_CHECK_BLOCKS) blocks at the sampling parameters
@@ -131,7 +132,7 @@ function sample_kinetic(out, post, xopt, strategy::FittingStrategy, rng; starts 
     )
     tb = Comrade.CoordinateView(post_cpu, space).tbase
     d = dimension(tb)
-    check = bias_check()
+    check = strategy.bias_steps > 0 ? bias_check(strategy.bias_steps) : nothing
     target = KineticSamplers.Target(LatentTarget(tpost, d); backend = ADTypes.AutoReactant())
     alg, warmup_alg = kinetic_samplers(strategy, d)
     name = String(nameof(typeof(alg)))
@@ -287,7 +288,11 @@ function sample_kinetic(out, post, xopt, strategy::FittingStrategy, rng; starts 
 
     params = Reactant.to_rarray(params; track_numbers = Number)
     if alg isa KineticSamplers.MCLMC && done == 0 && !strategy.bias_tuning
-        chains = _bias_diagnostic(rngs, target, alg, params, chains, d, check, trends)
+        if isnothing(check)
+            @info "MCLMC bias check skipped: sampler.bias_steps = 0"
+        else
+            chains = _bias_diagnostic(rngs, target, alg, params, chains, d, check, trends)
+        end
     end
     chains, trace = check_chains(target, rngs, alg, params, chains, block, d)
     writers = [ChainDrawWriter(dir) for dir in chain_dirs]
@@ -626,13 +631,15 @@ _bias_tolerances(check) = @sprintf(
 )
 
 """
-    bias_check() -> KineticSamplers.BiasCheck
+    bias_check(steps=$(BIAS_STEPS)) -> KineticSamplers.BiasCheck
 
-The bias check of an MCLMC run: coupled runs of $(BIAS_STEPS) steps, doubled up to
-$(BIAS_MAX_STEPS) while a round is undecided, with the Monte Carlo errors at an effective sample
-size of $(BIAS_ESS) as the tolerances.
+The bias check of an MCLMC run: coupled runs of `steps` steps in batches of $(BIAS_BATCH),
+doubled up to $(BIAS_MAX_FACTOR) times `steps` while a round is undecided, with the Monte Carlo
+errors at an effective sample size of $(BIAS_ESS) as the tolerances.
 """
-bias_check() = KineticSamplers.BiasCheck(; steps = BIAS_STEPS, ess = BIAS_ESS, max_steps = BIAS_MAX_STEPS)
+bias_check(steps = BIAS_STEPS) = KineticSamplers.BiasCheck(;
+    steps, batch = BIAS_BATCH, ess = BIAS_ESS, max_steps = BIAS_MAX_FACTOR * steps
+)
 
 """
     bias_budget(strategy) -> Int
