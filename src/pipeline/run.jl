@@ -7,7 +7,10 @@
 
 Parse the four config TOMLs (image, instrument, data, fitting), build the corresponding
 Comrade objects, copy the configs next to the run for provenance, and run
-[`comrade_imager`](@ref). Returns the output base path.
+[`comrade_imager`](@ref). Returns the output base path. For MCLMC and WALNUTS, the SHA-256
+digests of the image, instrument and data TOMLs and of the data and array files go to the
+warmup checkpoints, and a resumed warmup throws if any of these files has changed (see
+[`sample_kinetic`](@ref)); the sampler settings of the fitting TOML are checked separately.
 
 The sampler is always NUTS; whether it (and the optimizer) run on Reactant is the single
 `run.use_reactant` flag in the fitting TOML — it is not a per-invocation override.
@@ -51,5 +54,14 @@ function image_from_toml(
         end
     end
 
-    return comrade_imager(outpath, skym, intm, dcoh; strategy, imgdata, restart)
+    # The fitting config is left out: the checkpoint's own settings check covers the sampler
+    # settings it holds, and its other keys (such as `checkpoint_minutes`) may change between
+    # a stop and a resume.
+    inputs = if strategy.algorithm in KINETIC_ALGORITHMS
+        (; file, array) = data_paths(datacfg; base_dir = dirname(abspath(data)))
+        input_digests((; image, instrument, data, data_file = file, array_file = array))
+    else
+        nothing
+    end
+    return comrade_imager(outpath, skym, intm, dcoh; strategy, imgdata, restart, inputs)
 end

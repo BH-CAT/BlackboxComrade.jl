@@ -374,7 +374,7 @@ end
 
 """
     comrade_imager(outbase, skym, intm, data...; strategy, imgdata=nothing,
-                   rng=Random.default_rng(), restart=false)
+                   rng=Random.default_rng(), restart=false, inputs=nothing)
 
 Run the full imaging pipeline: staged noise-tempered optimization (or restart/start),
 save the optimal image + caltables, then sample the posterior (AdvancedHMC NUTS, Reactant
@@ -384,13 +384,15 @@ run was written to.
 `restart=true` loads the serialized optimum at `outbase` instead of re-optimizing. NUTS
 sampling resumes from the checkpoint at `outbase` when one was started (it holds
 `transport.jls`, the latent space it runs in) and otherwise starts fresh from the optimum;
-MCLMC sampling continues from its chains' last draws (see [`sample_kinetic`](@ref)). It is a one-off run action
-(not part of `strategy`).
+MCLMC sampling continues from its chains' last draws, and an unfinished MCLMC or WALNUTS warmup
+from its checkpoint (see [`sample_kinetic`](@ref)). It is a one-off run action
+(not part of `strategy`). `inputs`, the [`input_digests`](@ref) of the run's input files or
+`nothing`, goes to [`sample_kinetic`](@ref), whose warmup checkpoints hold it.
 """
 function comrade_imager(
         outbase::String, skym, intm, data...;
         strategy::FittingStrategy, imgdata = nothing, rng = Random.default_rng(),
-        restart::Bool = false
+        restart::Bool = false, inputs = nothing
     )
     @info "Imaging output base: $outbase"
     if strategy.use_reactant
@@ -476,7 +478,7 @@ function comrade_imager(
     end
     foreach(x -> check_start(post, latent_space(strategy), x), something(starts, [xopt]))
     chain = if strategy.algorithm in KINETIC_ALGORITHMS
-        sample_kinetic(out, post, xopt, strategy, rng; starts, resume = restart)
+        sample_kinetic(out, post, xopt, strategy, rng; starts, resume = restart, inputs)
     elseif strategy.use_reactant
         load_samples(_sample_reactant(out, post, xopt, strategy, resume, gimg, imgbase, transport_method, tgrad)...)
     else

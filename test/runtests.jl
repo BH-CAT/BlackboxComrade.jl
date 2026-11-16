@@ -2,7 +2,7 @@ using BlackboxComrade
 using Test
 using TOML
 using Random
-using Serialization: deserialize
+using Serialization: deserialize, serialize
 using LinearAlgebra
 using Statistics: cov, mean
 using Distributions: LogNormal, Normal, cdf, logpdf, quantile
@@ -10,6 +10,19 @@ import Enzyme
 
 const EXDIR = normpath(joinpath(@__DIR__, "..", "examples"))
 exconfig(f) = TOML.parsefile(joinpath(EXDIR, f))
+
+struct RunStopped <: Exception end
+
+# A logger that drops every message and throws `RunStopped` at one matching `pattern`, which
+# stops a run at that point.
+struct StopAtMessage <: Base.CoreLogging.AbstractLogger
+    pattern::Regex
+end
+Base.CoreLogging.min_enabled_level(::StopAtMessage) = Base.CoreLogging.Info
+Base.CoreLogging.shouldlog(::StopAtMessage, args...) = true
+Base.CoreLogging.catch_exceptions(::StopAtMessage) = false
+Base.CoreLogging.handle_message(logger::StopAtMessage, level, message, args...; kwargs...) =
+    occursin(logger.pattern, string(message)) ? throw(RunStopped()) : nothing
 
 @testset "BlackboxComrade.jl" begin
 
@@ -743,6 +756,12 @@ exconfig(f) = TOML.parsefile(joinpath(EXDIR, f))
         @test build_fitting_config(edited(mc, "sampler", "trajectory_quantile" => 1)).trajectory_quantile === 1.0
         @test_throws "sampler.trajectory_factor must be a positive number, got 0" build_fitting_config(edited(mc, "sampler", "trajectory_factor" => 0))
         @test (tuned.refit_trajectory_step, tuned.window_iterations) == (0.25, 3)
+        @test smc.checkpoint_minutes == 60
+        @test build_fitting_config(edited(mc, "sampler", "checkpoint_minutes" => 0)).checkpoint_minutes == 0
+        @test build_fitting_config(edited(mc, "sampler", "checkpoint_minutes" => 7.5)).checkpoint_minutes == 7.5
+        @test_throws "sampler.checkpoint_minutes must be nonnegative, got -1.0" build_fitting_config(
+            edited(mc, "sampler", "checkpoint_minutes" => -1)
+        )
         @test_throws "sampler.final must be nonnegative, got -1" build_fitting_config(edited(mc, "sampler", "final" => -1))
         @test_throws "sampler.stiff_directions must be at least 1, got 0" build_fitting_config(edited(mc, "sampler", "stiff_directions" => 0))
         @test_throws "sampler.stiff_draws must be at least 1, got 0" build_fitting_config(edited(mc, "sampler", "stiff_draws" => 0))
@@ -820,7 +839,20 @@ exconfig(f) = TOML.parsefile(joinpath(EXDIR, f))
         @test_throws "unknown key(s) [\"bias_tolerance\"] in [sampler]" build_fitting_config(edited(mc, "sampler", "bias_tolerance" => 0.05))
         check = BlackboxComrade.bias_check()
         @test isempty(check.focus) && check.max_mean_bias == 0.1 && check.max_variance_bias ≈ sqrt(2 / 100)
-        @test check.steps == 2000 && check.max_steps == 32000
+        @test check.steps == 2000 && check.max_steps == 32000 && check.batch == 250
+        @test build_fitting_config(mc).bias_steps == 2000
+        @test build_fitting_config(edited(mc, "sampler", "bias_steps" => 0)).bias_steps == 0
+        @test build_fitting_config(edited(mc, "sampler", "bias_steps" => 750)).bias_steps == 750
+        @test BlackboxComrade.bias_check(750).steps == 750 && BlackboxComrade.bias_check(750).max_steps == 12_000
+        @test_throws "sampler.bias_steps must be 0 or a multiple of 250 of at least 500, got 300" build_fitting_config(
+            edited(mc, "sampler", "bias_steps" => 300)
+        )
+        @test_throws "sampler.bias_tuning = true runs the bias check, which sampler.bias_steps = 0 skips; set one" build_fitting_config(
+            edited(mc, "sampler", "bias_tuning" => true, "bias_steps" => 0)
+        )
+        @test_throws "sampler.bias_steps applies to sampler.algorithm = \"mclmc\" only, not \"walnuts\"" build_fitting_config(
+            edited(wn, "sampler", "bias_steps" => 500)
+        )
         # A quarter of the sampling's gradients, three per coupled step.
         kept = build_fitting_config(edited(mc, "sampler", "nsample" => 600, "thin" => 5, "chunk_size" => 100))
         @test BlackboxComrade.bias_budget(kept) == 25_000
@@ -840,6 +872,11 @@ exconfig(f) = TOML.parsefile(joinpath(EXDIR, f))
         @test_throws "sampler.chains applies to sampler.algorithm = \"mclmc\" or \"walnuts\" only, not \"nuts\"" build_fitting_config(mc)
         delete!(mc["sampler"], "chains")
         @test_throws "sampler.max_step_halvings applies to sampler.algorithm = \"mclmc\" only, not \"nuts\"" build_fitting_config(mc)
+        nuts = deepcopy(mc)
+        delete!(nuts["sampler"], "max_step_halvings")
+        @test_throws "sampler.checkpoint_minutes applies to sampler.algorithm = \"mclmc\" or \"walnuts\" only, not \"nuts\"" build_fitting_config(
+            edited(nuts, "sampler", "checkpoint_minutes" => 30)
+        )
 
         cfg5["sampler"]["moves"] = [Dict{String, Any}("kind" => k) for k in ("phase_sheet", "flux_gain", "mean_field")]
         @test [m.kind for m in build_fitting_config(cfg5).moves] == ["phase_sheet", "flux_gain", "mean_field"]
@@ -961,6 +998,79 @@ exconfig(f) = TOML.parsefile(joinpath(EXDIR, f))
         snap = BB.load_kinetic_chains(wdir)
         @test Comrade.postsamples(snap)[1, 2].x == [2, 4]
         @test Comrade.samplerstats(snap)[1, 2] == (; logp = -40.0, phase = :adaptation, block = 4, steps = 400)
+        # A record rebuilt from its saved state drops what was written after it.
+        state = BB.record_state(r)
+        BB.record_block!(r, (; phase = :window, block = 5, steps = 10), 7.5, [-5.0, -50.0])
+        BB.record_positions!(r, (; phase = :window, block = 5, steps = 10), [-5.0, -50.0], [(; x = [1, 5]), (; x = [2, 5])])
+        BB.write_trace(r)
+        @test BB._written_draws([joinpath(wdir, "chain_$k") for k in 1:2]) == 2
+        @test_throws "the warmup record holds 2 chains, not 3" BB.WarmupRecord(wdir, 3, state)
+        # A record that cannot be rebuilt is left as it is, the chains before the one that
+        # fails among it.
+        @test_throws "holds 2 files of draws, fewer than the 3 of the warmup checkpoint" BB.WarmupRecord(
+            wdir, 2, merge(state, (; files = [1, 3]))
+        )
+        @test BB._written_draws([joinpath(wdir, "chain_$k") for k in 1:2]) == 2
+        back = BB.WarmupRecord(wdir, 2, state)
+        @test back.block == 1:4 && [w.files for w in back.writers] == [1, 1]
+        @test BB._written_draws([joinpath(wdir, "chain_$k") for k in 1:2]) == 1
+        @test !isfile(joinpath(wdir, "chain_1", "samples", "output_scan_00002.jls"))
+        @test deserialize(joinpath(wdir, "trace.jls")).block == 1:4
+        @test Comrade.postsamples(BB.load_kinetic_chains(wdir))[1, 2].x == [2, 4]
+        @test BB.check_warmup_checkpoint((; settings = (; d = 3, chains = 2)), "c.jls", (; d = 3, chains = 2)) === nothing
+        @test_throws "c.jls was written with sampler.chains = 2, but this run has 4" BB.check_warmup_checkpoint(
+            (; settings = (; d = 3, chains = 2)), "c.jls", (; d = 3, chains = 4)
+        )
+        @test_throws "c.jls was written with the latent dimension = 3, but this run has 5" BB.check_warmup_checkpoint(
+            (; settings = (; d = 3, chains = 2)), "c.jls", (; d = 5, chains = 2)
+        )
+        @test_throws "it was written by another version of BlackboxComrade" BB.check_warmup_checkpoint(
+            (; settings = (; d = 3)), "c.jls", (; d = 3, chains = 2)
+        )
+        @test BB.restore_moves!(nothing, nothing) === nothing
+        @test_throws "the warmup checkpoint holds the state of moves; this run has none" BB.restore_moves!(nothing, (;))
+        @test_throws "the warmup checkpoint holds the state of moves; this run has none" BB.check_move_state(nothing, (;))
+        @test BB.check_move_state(nothing, nothing) === nothing
+
+        # The digests of the input files, and a checkpoint resumes only with the same ones.
+        dir = mktempdir()
+        write(joinpath(dir, "a.toml"), "x = 1\n")
+        write(joinpath(dir, "b.uvfits"), "data")
+        files = (; fitting = joinpath(dir, "a.toml"), data_file = joinpath(dir, "b.uvfits"), array_file = nothing)
+        digests = BB.input_digests(files)
+        @test digests.fitting == bytes2hex(BB.SHA.sha256("x = 1\n"))
+        @test digests.data_file == bytes2hex(BB.SHA.sha256("data")) && isnothing(digests.array_file)
+        @test BB.check_warmup_inputs((; inputs = digests), "c.jls", digests) === nothing
+        @test BB.check_warmup_inputs((; inputs = nothing), "c.jls", nothing) === nothing
+        write(joinpath(dir, "b.uvfits"), "other data")
+        @test_throws "c.jls was written with other contents of the input files data_file; restart with the files it was written with" BB.check_warmup_inputs(
+            (; inputs = digests), "c.jls", BB.input_digests(files)
+        )
+        @test_throws "c.jls holds the digests of the input files of the run that wrote it, and this run has none to compare" BB.check_warmup_inputs(
+            (; inputs = digests), "c.jls", nothing
+        )
+        @test_throws "c.jls holds no digests of input files, and this run has them" BB.check_warmup_inputs(
+            (; inputs = nothing), "c.jls", digests
+        )
+        @test_throws "it was written by another version of BlackboxComrade" BB.check_warmup_inputs(
+            (; inputs = (; fitting = digests.fitting)), "c.jls", digests
+        )
+        @test BB.data_paths(Dict("paths" => Dict("file" => "d.uvfits", "array" => "/a.txt")); base_dir = dir) ==
+            (; file = joinpath(dir, "d.uvfits"), array = "/a.txt")
+        @test isnothing(BB.data_paths(Dict("paths" => Dict("file" => "d.uvfits", "path_mode" => "cwd"))).array)
+
+        # `move_state` and `restore_moves!` read and set these fields of Comrade's MoveSet, the
+        # whole of the state its calls change; a MoveSet that holds other fields fails here.
+        @test fieldnames(Comrade.MoveSet) == (
+            :moves, :dists, :ctx, :rounds, :initial_scale, :target_accept, :stats, :free, :output,
+            :compiled, :seconds, :tally,
+        )
+        @test fieldtype(Comrade.MoveSet, :stats) == Vector{Comrade._MoveStats}
+        @test fieldnames(Comrade._MoveStats) == (:logscales, :counts, :bystep)
+        @test fieldtype(Comrade.MoveSet, :seconds) == Base.RefValue{Float64}
+        @test fieldtype(Comrade.MoveSet, :tally) == Comrade._MoveTally
+        @test ismutabletype(Comrade._MoveTally)
+        @test fieldnames(Comrade._MoveTally) == (:accepted, :calls, :seconds, :first)
     end
 
     @testset "sky config + grid snapping" begin
@@ -1791,6 +1901,82 @@ exconfig(f) = TOML.parsefile(joinpath(EXDIR, f))
                     moved = findall(>(1.0e-9) ∘ abs, d)
                     @test !isempty(moved) && all(≈(2π; atol = 1.0e-9), d[moved])
                     @test Ip[free[2]] in moved && issubset(moved, Ip)
+                end
+
+                # An MCLMC warmup stopped after a checkpoint resumes through the restart path
+                # and gives the run that was not stopped: the same warmup, moves and draws.
+                @testset "MCLMC warmup resumes from its checkpoint" begin
+                    BB.Reactant.set_default_backend("cpu")
+                    strategy = FittingStrategy(;
+                        algorithm = "mclmc", use_reactant = true, step_size = nothing, chains = 2, nadapt = 2000,
+                        chunk_size = 10, final = 100, nsample = 4, window_iterations = 1,
+                        stiff_directions = 2, stiff_draws = 2, checkpoint_minutes = 1.0e-9,
+                        moves = [MoveSpec(; kind = "field_scale", params = ["a"])]
+                    )
+                    # A start near the mode keeps the short warmup's chains out of the tails.
+                    xm, _ = comrade_opt(postm, BB.Adam(); initial_params = θs[1], maxiters = 200, g_tol = 0.1)
+                    digests = (; fitting = "1", data_file = "2")
+                    run_kinetic(out, settings = strategy; resume = false, inputs = digests) = BB.sample_kinetic(
+                        out, postm, xm, settings, Random.Xoshiro(7); resume, inputs
+                    )
+                    # A logger that stops the run once the checkpoint after `block` is written.
+                    stopped(out, block; resume = false) = Base.CoreLogging.with_logger(StopAtMessage(Regex("checkpoint after block $block \\("))) do
+                        @test_throws RunStopped run_kinetic(out; resume)
+                    end
+                    full = mktempdir()
+                    run_kinetic(full)
+                    checkpoint_file = joinpath(full, "mclmc_warmup_checkpoint.jls")
+                    @test !isfile(checkpoint_file)
+                    expected = deserialize(joinpath(full, "mclmc_warmup.jls"))
+                    trace(out) = deserialize(joinpath(out, "warmup", "trace.jls"))
+                    draws(out) = Comrade.postsamples(BB.load_kinetic_chains(out))
+                    moves(out) = [(m.name, m.τ, m.warmup, m.sampling) for m in deserialize(joinpath(out, "moves.jls"))]
+                    warmup_draws(out) = BB._written_draws([joinpath(out, "warmup", "chain_$k") for k in 1:2])
+                    # Block 120 is in the adaptation, after moves at blocks 50 and 100; the
+                    # final phase starts after the 200 adaptation and 30 window blocks. The run
+                    # stops after block 120, resumes and stops again after block 235, and
+                    # resumes to its end.
+                    out = mktempdir()
+                    checkpoint_file = joinpath(out, "mclmc_warmup_checkpoint.jls")
+                    stopped(out, 120)
+                    early = deserialize(checkpoint_file)
+                    @test early.warmup.position.block == 120 && early.inputs == digests
+                    @test !isfile(joinpath(out, "mclmc_warmup.jls"))
+                    @test_throws "the warmup starts afresh, so move the earlier warmup record away" run_kinetic(out)
+                    stopped(out, 235; resume = true)
+                    later = deserialize(checkpoint_file)
+                    @test later.warmup.position.block == 235
+                    # A resume that fails its checks leaves the warmup record as it is: it keeps
+                    # the draws written after the checkpoint after block 120.
+                    written = warmup_draws(out)
+                    @test written > early.record.draws[1]
+                    serialize(checkpoint_file, early)
+                    longer = BlackboxComrade.@set strategy.nadapt = 2400
+                    @test_throws "was written with sampler.nadapt = 2000, but this run has 2400" run_kinetic(out, longer; resume = true)
+                    @test_throws "was written with other contents of the input files data_file" run_kinetic(
+                        out; resume = true, inputs = (; fitting = "1", data_file = "3")
+                    )
+                    serialize(checkpoint_file, BlackboxComrade.@set early.warmup.size = (early.warmup.size[1], 3))
+                    @test_throws "the checkpoint is of 3 chains" run_kinetic(out; resume = true)
+                    serialize(checkpoint_file, merge(early, (; rng = Random.MersenneTwister(1))))
+                    @test_throws "MersenneTwister, not of the run's generator" run_kinetic(out; resume = true)
+                    @test warmup_draws(out) == written
+                    serialize(checkpoint_file, later)
+                    # A checkpoint left partly written stops the run until it is removed.
+                    touch(checkpoint_file * ".tmp")
+                    @test_throws "$(checkpoint_file).tmp exists: the run stopped while writing a warmup checkpoint" run_kinetic(out; resume = true)
+                    @test warmup_draws(out) == written
+                    rm(checkpoint_file * ".tmp")
+                    @test_logs (:info, r"MCLMC warmup resumes after block 235") match_mode = :any run_kinetic(out; resume = true)
+                    @test !isfile(checkpoint_file) && !isfile(checkpoint_file * ".tmp")
+                    resumed = deserialize(joinpath(out, "mclmc_warmup.jls"))
+                    @test isequal(resumed.history, expected.history)
+                    @test resumed.params == expected.params
+                    @test draws(out) == draws(full)
+                    @test draws(joinpath(out, "warmup")) == draws(joinpath(full, "warmup"))
+                    @test [getfield(trace(out), k) for k in (:block, :phase, :steps, :logp)] ==
+                        [getfield(trace(full), k) for k in (:block, :phase, :steps, :logp)]
+                    @test moves(out) == moves(full)
                 end
             end
         else

@@ -39,7 +39,11 @@ term_buffer = 500
 #                        # mode that sets the cap's phase (0.05 gives 1.6 with McLachlan)
 # bias_tuning = false    # MCLMC only: reduce the warmup's step size until a coupled bias
 #                        # check passes (default false: the check runs once and is logged;
-#                        # true is an error with step_size)
+#                        # true is an error with step_size or bias_steps = 0)
+# bias_steps = 2000      # MCLMC only: steps of the coupled runs of the bias check after the
+#                        # warmup, a multiple of 250 of at least 500; 0 skips the check
+# checkpoint_minutes = 60  # MCLMC and WALNUTS only: wall time between warmup checkpoints,
+#                          # from which --restart resumes an unfinished warmup; 0 for none
 # reactant-only knobs:
 max_tree_depth = 10      # also WALNUTS's most trajectory doublings
 chunk_size = 100

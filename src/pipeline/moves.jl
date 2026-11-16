@@ -331,3 +331,55 @@ function build_moves(post::VLBIPosterior, specs, θ0; space = nothing, output = 
     end
     return Comrade.MoveSet(post, moves; space, θ0, rounds, initial_scale, target_accept, output)
 end
+
+"""
+    move_state(moves::Comrade.MoveSet)
+
+The state the calls of `moves` change: the step scales and acceptance counts of each move, the
+tally of warmup calls since the last report, and the seconds spent, with the names of the
+moves. [`restore_moves!`](@ref) sets it back.
+"""
+move_state(moves::Comrade.MoveSet) = (;
+    names = map(Comrade.move_name, collect(moves.moves)), stats = deepcopy(moves.stats),
+    tally = deepcopy(moves.tally), seconds = moves.seconds[],
+)
+
+"""
+    check_move_state(moves, state)
+
+Throws unless [`restore_moves!`](@ref) can set `moves` to the [`move_state`](@ref) `state`:
+both are `nothing`, or `state` holds moves of the same names.
+"""
+function check_move_state(::Nothing, state)
+    isnothing(state) || error("the warmup checkpoint holds the state of moves; this run has none")
+    return nothing
+end
+
+function check_move_state(moves::Comrade.MoveSet, state)
+    isnothing(state) && error("the warmup checkpoint holds no moves; this run has moves")
+    names = map(Comrade.move_name, collect(moves.moves))
+    names == state.names ||
+        error("the warmup checkpoint holds the moves $(state.names); this run has $names")
+    return nothing
+end
+
+"""
+    restore_moves!(moves, state)
+
+`moves` with the [`move_state`](@ref) `state`: nothing for no moves, which must have no state.
+It throws before changing `moves` unless `check_move_state(moves, state)` passes.
+"""
+function restore_moves!(::Nothing, state)
+    check_move_state(nothing, state)
+    return nothing
+end
+
+function restore_moves!(moves::Comrade.MoveSet, state)
+    check_move_state(moves, state)
+    moves.stats .= state.stats
+    t = moves.tally
+    t.accepted .= state.tally.accepted
+    t.calls, t.seconds, t.first = state.tally.calls, state.tally.seconds, state.tally.first
+    moves.seconds[] = state.seconds
+    return moves
+end
