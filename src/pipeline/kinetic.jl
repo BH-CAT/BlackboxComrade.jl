@@ -152,8 +152,9 @@ function sample_kinetic(out, post, xopt, strategy::FittingStrategy, rng; starts 
     stiff = KineticSamplers.StiffDirections(;
         directions = strategy.stiff_directions, draws = strategy.stiff_draws
     )
+    # Float32 records halve the host memory of the store; the fits run in Float64.
     mass = KineticSamplers.HistoryMassAdaptation(;
-        max_rank = 100, max_wide = 80, stiff, vecs_eltype = Float32
+        max_rank = 100, max_wide = 80, stiff, vecs_eltype = Float32, store_eltype = Float32
     )
     adapt = if alg isa KineticSamplers.WALNUTS
         KineticSamplers.PooledAdaptation(nadapt; mass)
