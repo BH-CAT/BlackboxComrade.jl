@@ -61,7 +61,8 @@ end
 collect_device_garbage(block) = block % 50 == 0 ? GC.gc() : (block % 5 == 0 && GC.gc(false))
 
 """
-    sample_kinetic(out, post, xopt, strategy, rng; starts=nothing, resume=false) -> Comrade.PosteriorSamples
+    sample_kinetic(out, post, xopt, strategy, rng; starts=nothing, resume=false, inputs=nothing)
+        -> Comrade.PosteriorSamples
 
 `strategy.chains` chains of the KineticSamplers algorithm `strategy.algorithm` (MCLMC or
 WALNUTS) on `post` in the latent space of `strategy.latent_space`, compiled with Reactant, started at `xopt`
@@ -101,10 +102,28 @@ than its margin of standard errors, and sampling continues at the warmup's step 
 follow, whose energy statistics are logged per chain; if they fail
 `KineticSamplers.check_energy`, a warning says so and sampling continues.
 
+Every `strategy.checkpoint_minutes` minutes of wall time (none for 0), at the end of a block,
+the warmup writes a checkpoint to `out/mclmc_warmup_checkpoint.jls` or
+`out/walnuts_warmup_checkpoint.jls`, replacing the one before: KineticSamplers' warmup state
+(see `KineticSamplers.WarmupCheckpoint`), the `WarmupRecord`, the scalar parameters of the final
+phase that [`warn_trends`](@ref) checks, the state of `rng` and of the moves, whose step scales
+adapt in the warmup, the seeds of the sampling generators, the elapsed time, and `inputs`, the
+SHA-256 digests of the run's model inputs, the image, instrument and data configs and the
+data and array files (see [`input_digests`](@ref)), or `nothing`. Each
+checkpoint is written to a file with the suffix `.tmp` and then renamed, so the checkpoint
+file always holds a whole checkpoint; a `.tmp` file left by a run that stopped while writing
+one is an error at the next start. The checkpoint is removed once the warmup file is written.
+
 With `resume`, MCLMC sampling whose warmup finished (`out/mclmc_warmup.jls`) and which wrote
 draws continues instead: no warmup, the parameters of that file, each chain from its last draw,
 appending draws until `strategy.nsample`, without the bias check or tuning; the trajectory report then
-covers all draws. Without draws it starts afresh, which needs `out/warmup` moved away.
+covers all draws. With `resume`, a warmup checkpoint and no warmup file, the warmup continues
+from the checkpoint, with `out/warmup` cut back to it, and the run then goes on as one that
+was not interrupted: the same warmup, bias check and draws, given the same settings. It throws
+if the checkpoint's latent dimension, chains, sampler, moves, warmup settings, input digests
+or `rng` type differ from the run's, before it changes `out/warmup`, `rng` or the moves.
+Otherwise, without draws the warmup starts afresh, which needs `out/warmup` and any checkpoint
+moved away.
 
 Sampling keeps `strategy.nsample` draws per chain, chain `k` written as a Comrade sample
 directory `out/chain_k`: for MCLMC the last position of every `strategy.thin`-th block, so the
@@ -118,7 +137,10 @@ $(KINETIC_RETURNED_DRAWS) draws, evenly thinned from each chain, as a draws × c
 After MCLMC sampling, [`trajectory_report`](@ref) logs the autocorrelation times of the scalar
 parameters and writes them to `out/trajectory_report.toml`.
 """
-function sample_kinetic(out, post, xopt, strategy::FittingStrategy, rng; starts = nothing, resume = false)
+function sample_kinetic(
+        out, post, xopt, strategy::FittingStrategy, rng; starts = nothing, resume = false,
+        inputs = nothing
+    )
     K = strategy.chains
     chain_dirs = [joinpath(out, "chain_$k") for k in 1:K]
     existing = filter(ispath, chain_dirs)
@@ -137,6 +159,7 @@ function sample_kinetic(out, post, xopt, strategy::FittingStrategy, rng; starts 
     alg, warmup_alg = kinetic_samplers(strategy, d)
     name = String(nameof(typeof(alg)))
     warmup_file = joinpath(out, "$(lowercase(name))_warmup.jls")
+    checkpoint_file = joinpath(out, "$(lowercase(name))_warmup_checkpoint.jls")
     done = resume ? _written_draws(chain_dirs) : 0
     done > 0 && !isfile(warmup_file) &&
         error("$out holds $done draws per chain but no $(basename(warmup_file)); sampling cannot resume")
@@ -225,15 +248,75 @@ function sample_kinetic(out, post, xopt, strategy::FittingStrategy, rng; starts 
             name, done, strategy.nsample, host_params.step_size, host_params.trajectory_length, warmup_file
         )
     else
-        ispath(joinpath(out, "warmup")) && error(
-            "$(joinpath(out, "warmup")) exists; the warmup starts afresh, so move the earlier warmup record away"
+        partial = checkpoint_file * ".tmp"
+        isfile(partial) && error(
+            "$partial exists: the run stopped while writing a warmup checkpoint. Remove it to " *
+                "restart from $(basename(checkpoint_file)), the checkpoint written before it " *
+                "(if there is one), or move both away, with $(joinpath(out, "warmup")), to " *
+                "start the warmup afresh"
         )
+        saved = resume && !isfile(warmup_file) && isfile(checkpoint_file) ?
+            deserialize(checkpoint_file) : nothing
+        if isnothing(saved)
+            ispath(joinpath(out, "warmup")) && error(
+                "$(joinpath(out, "warmup")) exists; the warmup starts afresh, so move the earlier warmup record away"
+            )
+            isfile(checkpoint_file) && error(
+                "$checkpoint_file exists; restart the run to resume its warmup, or move it away"
+            )
+        end
         @info "$name: $K chains on $d latent coordinates, warmup $nadapt $(layout.unit) per chain in " *
             "blocks of $warmup_block, $(strategy.nsample) draws per chain" *
             (strategy.thin > 1 ? ", one every $(strategy.thin) blocks" : "") * "; $(repr(alg))"
-        record = WarmupRecord(joinpath(out, "warmup"), K)
-        final_scalars = Vector{Vector{Pair{String, Float64}}}[]
-        t0 = time()
+        # Drawn from `rng` before a checkpoint restores it; a resumed warmup sets these
+        # generators to its saved states.
+        warmup_rngs = host_rngs(K)
+        settings = warmup_settings(strategy, d, warmup_alg)
+        if isnothing(saved)
+            record = WarmupRecord(joinpath(out, "warmup"), K)
+            final_scalars = Vector{Vector{Pair{String, Float64}}}[]
+            elapsed = 0.0
+        else
+            # Every check runs before the warmup record, `rng` and the moves change.
+            check_warmup_checkpoint(saved, checkpoint_file, settings)
+            check_warmup_inputs(saved, checkpoint_file, inputs)
+            KineticSamplers.check_resume(saved.warmup, target, adapt, warmup_alg, Θ, warmup_rngs)
+            check_move_state(moves, saved.moves)
+            typeof(saved.rng) == typeof(rng) || error(
+                "$checkpoint_file holds the state of a $(typeof(saved.rng)), not of the run's " *
+                    "generator, a $(typeof(rng))"
+            )
+            record = WarmupRecord(joinpath(out, "warmup"), K, saved.record)
+            final_scalars = saved.final_scalars
+            copy!(rng, saved.rng)
+            restore_moves!(moves, saved.moves)
+            foreach((r, seed) -> copyto!(r.seed, seed), rngs, saved.sampling_seeds)
+            elapsed = saved.seconds
+            p = saved.warmup.position
+            @info "$name warmup resumes after block $(p.block), in its $(p.phase) phase at " *
+                "$(p.steps) $(layout.unit) per chain, from $checkpoint_file"
+        end
+        t0 = time() - elapsed
+        last_checkpoint = Ref(time())
+        function checkpoint(snapshot, position)
+            time() - last_checkpoint[] >= 60 * strategy.checkpoint_minutes || return nothing
+            tc = time()
+            write_warmup_checkpoint(
+                checkpoint_file, (;
+                    settings, inputs, warmup = snapshot(), record = record_state(record),
+                    final_scalars, rng = copy(rng),
+                    moves = isnothing(moves) ? nothing : move_state(moves),
+                    sampling_seeds = [Array(r.seed) for r in rngs], seconds = time() - t0,
+                )
+            )
+            last_checkpoint[] = time()
+            @info @sprintf(
+                "%s warmup checkpoint after block %d (%s) written to %s in %.0f s",
+                name, position.block, position.phase, checkpoint_file, time() - tc
+            )
+            _flush_logs()
+            return nothing
+        end
         function between_blocks(chains, info)
             collect_device_garbage(info.block)
             logp = Array(chains.state.logp)
@@ -260,8 +343,13 @@ function sample_kinetic(out, post, xopt, strategy::FittingStrategy, rng; starts 
             return chains
         end
         chains, params, history = KineticSamplers.warmup(
-            host_rngs(K), target, adapt, warmup_alg, Θ; between_blocks, check = false
+            warmup_rngs, target, adapt, warmup_alg, Θ; between_blocks, check = false,
+            checkpoint = strategy.checkpoint_minutes > 0 ? checkpoint : nothing,
+            resume = isnothing(saved) ? nothing : saved.warmup
         )
+        # The warmup continued in the memory of the checkpoint, which it changed; dropping it
+        # frees that memory, the records among it.
+        saved = nothing
         write_trace(record)
         foreach(flush_draws!, record.writers)
         if alg isa KineticSamplers.MCLMC
@@ -285,6 +373,7 @@ function sample_kinetic(out, post, xopt, strategy::FittingStrategy, rng; starts 
         end
         host_params = _host_params(params)
         serialize(warmup_file, (; history, params = host_params))
+        rm(checkpoint_file; force = true)
     end
 
     params = Reactant.to_rarray(params; track_numbers = Number)
@@ -788,12 +877,33 @@ function flush_draws!(w::ChainDrawWriter)
         joinpath(w.dir, "samples", @sprintf("output_scan_%05d.jls", w.files)),
         (samples = Comrade.postsamples(ps), stats = Comrade.samplerstats(ps))
     )
-    serialize(
-        joinpath(w.dir, "parameters.jls"),
-        (; params = Comrade.DiskOutput(abspath(w.dir), w.files, w.per_file, w.draws))
-    )
+    _write_parameters(w)
     empty!(w.samples)
     empty!(w.stats)
+    return w
+end
+
+# `parameters.jls` of `w`, which Comrade reads to load its draws; none without draws.
+function _write_parameters(w::ChainDrawWriter)
+    file = joinpath(w.dir, "parameters.jls")
+    w.files == 0 && return rm(file; force = true)
+    serialize(file, (; params = Comrade.DiskOutput(abspath(w.dir), w.files, w.per_file, w.draws)))
+    return nothing
+end
+
+"""
+    truncate_draws!(w::ChainDrawWriter, files, draws)
+
+`w` cut back to its first `files` files, holding `draws` draws: the later files are removed and
+`parameters.jls` rewritten.
+"""
+function truncate_draws!(w::ChainDrawWriter, files, draws)
+    check_truncation(w, files)
+    for f in (files + 1):w.files
+        rm(joinpath(w.dir, "samples", @sprintf("output_scan_%05d.jls", f)); force = true)
+    end
+    w.files, w.draws = files, draws
+    _write_parameters(w)
     return w
 end
 
@@ -821,6 +931,134 @@ WarmupRecord(dir, K) = WarmupRecord(
     mkpath(dir), Int[], Symbol[], Int[], Float64[], Vector{Float64}[],
     [ChainDrawWriter(joinpath(dir, "chain_$k"), 1) for k in 1:K]
 )
+
+function check_truncation(w::ChainDrawWriter, files)
+    isempty(w.samples) || error("$(w.dir) has draws not yet written")
+    files <= w.files || error(
+        "$(w.dir) holds $(w.files) files of draws, fewer than the $files of the warmup checkpoint"
+    )
+    return nothing
+end
+
+"""
+    WarmupRecord(dir, K, state)
+
+The `WarmupRecord` of `K` chains under `dir` as `record_state` saved it in `state`, with the
+draws of `dir/chain_k` written after it removed and `dir/trace.jls` rewritten. It throws before
+removing any draw if a chain holds fewer files of draws than `state`.
+"""
+function WarmupRecord(dir, K, state)
+    length(state.files) == K ||
+        error("the warmup record holds $(length(state.files)) chains, not $K")
+    r = WarmupRecord(dir, K)
+    foreach(check_truncation, r.writers, state.files)
+    append!(r.block, state.block)
+    append!(r.phase, state.phase)
+    append!(r.steps, state.steps)
+    append!(r.seconds, state.seconds)
+    append!(r.logp, state.logp)
+    foreach(truncate_draws!, r.writers, state.files, state.draws)
+    write_trace(r)
+    return r
+end
+
+# The contents of `r` and the files and draws of its writers, from which
+# `WarmupRecord(dir, K, state)` rebuilds it.
+function record_state(r::WarmupRecord)
+    all(w -> isempty(w.samples), r.writers) || error("the warmup record has draws not yet written")
+    return (;
+        block = copy(r.block), phase = copy(r.phase), steps = copy(r.steps),
+        seconds = copy(r.seconds), logp = copy(r.logp), files = [w.files for w in r.writers],
+        draws = [w.draws for w in r.writers],
+    )
+end
+
+"""
+    warmup_settings(strategy, d, alg)
+
+The settings of `strategy` that a warmup of the sampler `alg` on `d` latent coordinates
+depends on, which a resumed warmup must match (see `check_warmup_checkpoint`), with the
+sampler and the moves as their `repr`.
+"""
+warmup_settings(strategy, d, alg) = (;
+    d, strategy.chains, sampler = repr(alg), moves = repr(strategy.moves), strategy.nadapt,
+    strategy.chunk_size, strategy.final, strategy.stiff_directions, strategy.stiff_draws,
+    strategy.trajectory_rows, strategy.trajectory_quantile, strategy.trajectory_factor,
+    strategy.refit_trajectory_step, strategy.window_iterations, strategy.trajectory_length,
+    strategy.max_mode_phase, strategy.max_mode_bias, strategy.latent_space,
+)
+
+"""
+    check_warmup_checkpoint(saved, file, settings)
+
+Throws unless the warmup checkpoint `saved`, read from `file`, was written with the
+`warmup_settings` `settings`.
+"""
+function check_warmup_checkpoint(saved, file, settings)
+    keys(saved.settings) == keys(settings) || error(
+        "$file holds the warmup settings $(keys(saved.settings)), not $(keys(settings)); " *
+            "it was written by another version of BlackboxComrade"
+    )
+    for (key, value) in pairs(settings)
+        was = saved.settings[key]
+        isequal(was, value) && continue
+        name = key === :d ? "the latent dimension" :
+            key === :sampler ? "the warmup's sampler" : "sampler.$key"
+        error(
+            "$file was written with $name = $was, but this run has $value; restart with the " *
+                "settings it was written with, or move it and the warmup record away to start " *
+                "the warmup afresh"
+        )
+    end
+    return nothing
+end
+
+"""
+    input_digests(files)
+
+The SHA-256 digest of each file of the `NamedTuple` `files` of paths, as a `NamedTuple` with
+the same names, and `nothing` for a path that is `nothing`. A warmup checkpoint holds the
+digests of the run's input files, which [`check_warmup_inputs`](@ref) compares on resuming.
+"""
+input_digests(files::NamedTuple) =
+    map(path -> isnothing(path) ? nothing : bytes2hex(open(SHA.sha256, path)), files)
+
+"""
+    check_warmup_inputs(saved, file, inputs)
+
+Throws unless the warmup checkpoint `saved`, read from `file`, was written with the
+[`input_digests`](@ref) `inputs` (both `nothing` when the run has no input files to check).
+"""
+function check_warmup_inputs(saved, file, inputs)
+    was = saved.inputs
+    isequal(was, inputs) && return nothing
+    afresh = "or move it and the warmup record away to start the warmup afresh"
+    isnothing(inputs) && error(
+        "$file holds the digests of the input files of the run that wrote it, and this run " *
+            "has none to compare: resume it from its config files, $afresh"
+    )
+    isnothing(was) && error(
+        "$file holds no digests of input files, and this run has them: resume it as it was " *
+            "started, without input files, $afresh"
+    )
+    keys(was) == keys(inputs) || error(
+        "$file holds the digests of the input files $(keys(was)), not $(keys(inputs)); " *
+            "it was written by another version of BlackboxComrade"
+    )
+    changed = [String(k) for k in keys(inputs) if !isequal(was[k], inputs[k])]
+    error(
+        "$file was written with other contents of the input files $(join(changed, ", ")); " *
+            "restart with the files it was written with, $afresh"
+    )
+end
+
+# `state` written to `file` through a temporary file, so `file` always holds a whole
+# checkpoint.
+function write_warmup_checkpoint(file, state)
+    serialize(file * ".tmp", state)
+    mv(file * ".tmp", file; force = true)
+    return file
+end
 
 function record_block!(r::WarmupRecord, info, seconds, logp)
     length(logp) == length(r.writers) ||

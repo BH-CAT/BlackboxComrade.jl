@@ -14,6 +14,31 @@ function _infer_format(file::AbstractString)
 end
 
 """
+    data_paths(cfg::AbstractDict; base_dir=pwd()) -> (; file, array)
+
+The data file and the array file (`nothing` without one) of the data config `cfg`, resolved as
+[`build_data_config`](@ref) resolves them.
+"""
+function data_paths(cfg::AbstractDict; base_dir::AbstractString = pwd())
+    haskey(cfg, "paths") || error("data config needs a [paths] section with a 'file'")
+    paths = cfg["paths"]
+    check_config_keys(paths, ("file", "array", "path_mode"), "[paths]")
+    haskey(paths, "file") || error("data config [paths] needs a 'file'")
+
+    path_mode = String(get(paths, "path_mode", "toml"))
+    path_mode in ("toml", "cwd") || error(
+        "paths.path_mode must be \"toml\" (resolve relative file/array against the TOML's " *
+            "directory) or \"cwd\" (against the launch directory); got '$path_mode'"
+    )
+    _resolve(p) = (path_mode == "toml" && !isabspath(p)) ? abspath(joinpath(base_dir, p)) : p
+    file = _resolve(String(paths["file"]))
+    # `array` is optional (feed-rotation/mount overrides): omit it for uvfits to keep the
+    # data file's own mount metadata. dlist still requires it (build_data_dlist enforces this).
+    array = haskey(paths, "array") ? _resolve(String(paths["array"])) : nothing
+    return (; file, array)
+end
+
+"""
     build_data_config(cfg::AbstractDict; base_dir=pwd(), polrep=PolExp()) -> EHTObservationTable
 
 Load and flag the data described by a parsed data TOML. `polrep` (the sky model's
@@ -43,21 +68,7 @@ function build_data_config(
         cfg::AbstractDict; base_dir::AbstractString = pwd(), polrep::PolRep = PolExp()
     )
     check_config_keys(cfg, ("paths", "data", "flags"), "the data config (top level)")
-    haskey(cfg, "paths") || error("data config needs a [paths] section with a 'file'")
-    paths = cfg["paths"]
-    check_config_keys(paths, ("file", "array", "path_mode"), "[paths]")
-    haskey(paths, "file") || error("data config [paths] needs a 'file'")
-
-    path_mode = String(get(paths, "path_mode", "toml"))
-    path_mode in ("toml", "cwd") || error(
-        "paths.path_mode must be \"toml\" (resolve relative file/array against the TOML's " *
-            "directory) or \"cwd\" (against the launch directory); got '$path_mode'"
-    )
-    _resolve(p) = (path_mode == "toml" && !isabspath(p)) ? abspath(joinpath(base_dir, p)) : p
-    file = _resolve(String(paths["file"]))
-    # `array` is optional (feed-rotation/mount overrides): omit it for uvfits to keep the
-    # data file's own mount metadata. dlist still requires it (build_data_dlist enforces this).
-    array = haskey(paths, "array") ? _resolve(String(paths["array"])) : nothing
+    (; file, array) = data_paths(cfg; base_dir)
 
     dat = get(cfg, "data", Dict{String, Any}())
     check_config_keys(

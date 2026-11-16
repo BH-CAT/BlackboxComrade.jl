@@ -15,6 +15,7 @@ using LinearAlgebra
 using Random
 using Printf
 using Serialization
+import SHA
 using Dates: Dates
 using TOML
 using FINUFFT

@@ -89,6 +89,8 @@ Base.@kwdef struct FittingStrategy
     trajectory_factor::Union{Nothing, Float64} = nothing
     refit_trajectory_step::Float64 = 1.0
     window_iterations::Int = 2
+    # MCLMC and WALNUTS: minutes between warmup checkpoints, 0 for none
+    checkpoint_minutes::Float64 = 60.0
     # "nuts", or "mclmc" or "walnuts" for KineticSamplers chains with `chains` chains and a
     # pooled warmup
     algorithm::String = "nuts"
@@ -173,15 +175,18 @@ autocorrelation times that sets it, or `"mean"` for their mean, and `trajectory_
 KineticSamplers' `PooledAdaptation`. `refit_trajectory_step` (default 1) is the
 fraction of the way, on a log scale, that each window after a refit moves the trajectory length
 toward its estimate, and `window_iterations` (default 2) is the number of windows after the
-adaptation, each starting at the trajectory length the one before gave. `trajectory_length`, in
-units of √d, fixes MCLMC's trajectory length, and the warmup then runs no window; left out, the
-windows set it. `step_size` fixes MCLMC's sampling step size; left out, the warmup's adapted
-step size is used. `bias_steps` (default $(BIAS_STEPS)) is the steps of the coupled runs of the
-MCLMC bias check after the warmup, a multiple of $(BIAS_BATCH) of at least $(2 * BIAS_BATCH), or 0
-to skip the check. `bias_tuning` (default false) reduces the warmup's MCLMC step size until a
-coupled bias check passes (see [`sample_kinetic`](@ref)); without it the check runs once and is
-logged, and `bias_tuning = true` is an error with `step_size` or with `bias_steps = 0`. After
-sampling, the run logs and writes the
+adaptation, each starting at the trajectory length the one before gave. `checkpoint_minutes`
+(default 60) is the wall time between the checkpoints an MCLMC or WALNUTS warmup writes, from
+which `--restart` resumes an unfinished warmup (see [`sample_kinetic`](@ref)); 0 writes
+none. `trajectory_length`, in units of √d, fixes MCLMC's trajectory length, and the warmup
+then runs no window; left out, the windows set it. `step_size` fixes MCLMC's sampling step
+size; left out, the warmup's adapted step size is used. `bias_steps` (default $(BIAS_STEPS)) is
+the steps of the coupled runs of the MCLMC bias check after the warmup, a multiple of
+$(BIAS_BATCH) of at least $(2 * BIAS_BATCH), or 0 to skip the check. `bias_tuning` (default
+false) reduces the warmup's MCLMC step size until a coupled bias check passes (see
+[`sample_kinetic`](@ref)); without it the check runs once and is logged, and
+`bias_tuning = true` is an error with `step_size` or with `bias_steps = 0`. After sampling, the
+run logs and writes the
 autocorrelation times of the scalar parameters in units of the trajectory length (see
 [`trajectory_report`](@ref)). For WALNUTS every draw is kept, `chunk_size`
 (default 10) is the draws per sampling block, which must divide `nsample`, and `max_tree_depth`
@@ -275,6 +280,7 @@ function build_fitting_config(cfg::AbstractDict)
             "thin", "final",
             "stiff_directions", "stiff_draws", "trajectory_rows", "trajectory_quantile",
             "trajectory_factor", "refit_trajectory_step", "window_iterations",
+            "checkpoint_minutes",
         ),
         "[sampler]"
     )
@@ -339,6 +345,7 @@ function build_fitting_config(cfg::AbstractDict)
             "refit_trajectory_step" => ("mclmc",),
             "window_iterations" => ("mclmc",),
             "stiff_directions" => KINETIC_ALGORITHMS, "stiff_draws" => KINETIC_ALGORITHMS,
+            "checkpoint_minutes" => KINETIC_ALGORITHMS,
         )
         haskey(samp, key) && !(algorithm in allowed) && error(
             "sampler.$key applies to sampler.algorithm = $(join(repr.(allowed), " or ")) only, " *
@@ -384,6 +391,9 @@ function build_fitting_config(cfg::AbstractDict)
     window_iterations = Int(get(samp, "window_iterations", 2))
     window_iterations >= 1 ||
         error("sampler.window_iterations must be at least 1, got $window_iterations")
+    checkpoint_minutes = Float64(get(samp, "checkpoint_minutes", 60.0))
+    checkpoint_minutes >= 0 ||
+        error("sampler.checkpoint_minutes must be nonnegative, got $checkpoint_minutes")
     (algorithm == "walnuts" && nsample % chunk_size != 0) && error(
         "sampler.nsample = $nsample must be a multiple of sampler.chunk_size = $chunk_size, " *
             "the WALNUTS draws per block"
@@ -438,6 +448,7 @@ function build_fitting_config(cfg::AbstractDict)
         ),
         refit_trajectory_step,
         window_iterations,
+        checkpoint_minutes,
         moves,
         algorithm,
         chains,
