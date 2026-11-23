@@ -621,6 +621,12 @@ Base.CoreLogging.handle_message(logger::StopAtMessage, level, message, args...; 
         @test s.nsample == 10_000
         @test !s.use_reactant
         @test isnothing(s.start)
+        @test s.posterior_images == 500
+        cfgi = exconfig("fitting.toml")
+        cfgi["run"]["posterior_images"] = 200
+        @test build_fitting_config(cfgi).posterior_images == 200
+        cfgi["run"]["posterior_images"] = -1
+        @test_throws "run.posterior_images must be at least 0, got -1" build_fitting_config(cfgi)
         # `checkpoint` is accepted as an alias for `sample_checkpoint` (which wins when both
         # are set, so drop the explicit key first)
         cfg = exconfig("fitting.toml")
