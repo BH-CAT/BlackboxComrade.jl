@@ -221,6 +221,26 @@ Base.CoreLogging.handle_message(logger::StopAtMessage, level, message, args...; 
         @test all(n -> haskey(intm.prior, n), (:qwpθμ, :qwpημ, :feedδμ, :feedχμ, :qwpθ, :qwpη, :feedδ, :feedχ))
     end
 
+    @testset "leakage_feed_retarder_track" begin
+        BB = BlackboxComrade
+        @test BB.required_params(BB.LEAKAGE_SCHEMES["leakage_feed_retarder_track"]) ==
+            (:qwpθ, :qwpη, :feedδ, :feedχ)
+        x = (qwpθ = 0.11, qwpη = -0.05, feedδ = 0.05, feedχ = -0.03)
+        j = BB._leakage_feed_retarder_track_pmap_1(x)
+        @test collect(j) ≈ collect(BB.feed_retarder_jones(0.11, -0.05, 0.05, -0.03))
+
+        cfg = exconfig("instrument_mixed.toml")
+        cfg["leakage"]["scheme"] = "leakage_feed_retarder_track"
+        for n in ("qwpθ", "qwpη", "feedδ", "feedχ")
+            cfg["priors"][n] = Dict{String, Any}(
+                "seg" => "track", "dist" => Dict{String, Any}("dist" => "Normal", "args" => [0.0, 0.1])
+            )
+        end
+        intm = assemble_instrument(cfg)
+        @test intm isa InstrumentModel
+        @test all(n -> haskey(intm.prior, n), (:qwpθ, :qwpη, :feedδ, :feedχ))
+    end
+
     @testset "instrument assembler" begin
         intm = build_instrument_config(exconfig("instrument_mixed.toml"))
         @test intm isa InstrumentModel
