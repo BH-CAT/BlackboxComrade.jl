@@ -1154,6 +1154,13 @@ Base.CoreLogging.handle_message(logger::StopAtMessage, level, message, args...; 
         @test keys(BB.genmeanprior(core)) == (:fwhm, :logη)
         gauss = baseimage(intensitymap(modify(Gaussian(), Stretch(μas2rad(40.0) / BB.fwhmfac)), g))
         @test baseimage(BB.make_mean(core, g, (; fwhm = μas2rad(40.0), logη = log(0.01)))) ≈ gauss ./ sum(gauss) rtol = 0.02
+        # the profile is VLBISkyModels' `TBlob`, without its gamma-function normalization
+        for ν in (0.5, 4.0, 60.0)
+            s = μas2rad(15.0)
+            ref = baseimage(intensitymap(modify(TBlob(ν), Stretch(s)), g))
+            new = baseimage(intensitymap(modify(BB.TBlobProfile(ν), Stretch(s)), g))
+            @test new ≈ ref rtol = 1.0e-12
+        end
         icfg = exconfig("image.toml")
         icfg["mean"] = Dict{String, Any}("type" => "TBlob", "fwhm" => 40.0)
         skym, _ = build_sky_config(icfg)
