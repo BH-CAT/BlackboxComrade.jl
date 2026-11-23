@@ -526,6 +526,62 @@ end
     end
 end
 
+"""
+    linear_feed_jones(θ, δ, χ1, χ2) -> (j11, j21, j12, j22)
+
+Jones matrix, in column-major order and the linear basis, of two linear probes relative to
+ideal probes at angles 0 and π/2. The probes are the rows of
+
+    M = [ e(θ, χ1)
+          e(π/2 + θ + δ, χ2) ],   e(t, χ) = cos χ [cos t  sin t] + i sin χ [-sin t  cos t]
+
+feed 1 at angle `θ` and feed 2 rotated by `δ` from orthogonal to it, each elliptical with its
+own ellipticity angle `χ1`, `χ2`: `cos χ` times its axis plus `i sin χ` times its axis turned
+by +π/2. It is the identity at `θ = δ = χ1 = χ2 = 0`.
+
+`θ` turns both probes together, in the same sense as Comrade's feed-rotation offset: with
+`δ = χ1 = χ2 = 0` the matrix is the linear-basis form of the rotation that adding `θ` to the
+station's `fr_offset` applies. Unlike for circular feeds, the gains cannot hold this rotation,
+since it mixes the two feeds. To first order the leakage is `d1 = J₁₂/J₁₁ = θ + iχ1` and
+`d2 = J₂₁/J₂₂ = -(θ + δ) - iχ2`, so each parameter moves one of the four real directions of
+the two d-terms. `θ + π` gives `-M`, a sign the gain phases absorb.
+"""
+function linear_feed_jones(θ, δ, χ1, χ2)
+    ψ = θ + δ
+    c1, s1 = cos(χ1), sin(χ1)
+    c2, s2 = cos(χ2), sin(χ2)
+    j11 = complex(c1 * cos(θ), -s1 * sin(θ))
+    j12 = complex(c1 * sin(θ), s1 * cos(θ))
+    j21 = complex(-c2 * sin(ψ), -s2 * cos(ψ))
+    j22 = complex(c2 * cos(ψ), -s2 * sin(ψ))
+    return (j11, j21, j12, j22)
+end
+
+#     leakage_linear_feed(; priors)
+#
+# Leakage of two linear probes (`linear_feed_jones`) with no other leakage terms: the angle
+# of the probe pair feedθ, the second probe's departure from orthogonality feedδ, and the
+# probes' ellipticities feedχ1 and feedχ2, all in radians. Each is a per-station value over
+# the track (feedθμ, …, typically `seg = "track"`) plus a residual about it (feedθ, …,
+# typically a zero-mean stationary OU chain with a small σ and a long τ), as in
+# `leakage_disk_offsets`. The Jones matrix is in the linear basis, so it describes stations
+# recorded with linear feeds: the response (`JonesR`) before it changes the reference basis
+# to the station's recorded basis. A common feedθμ at every station is a rotation of the
+# sky's EVPA, so one station's feedθμ must be fixed.
+@instrument function leakage_linear_feed(; priors)
+    return @jones begin
+        feedθμ ~ priors.feedθμ
+        feedδμ ~ priors.feedδμ
+        feedχ1μ ~ priors.feedχ1μ
+        feedχ2μ ~ priors.feedχ2μ
+        feedθ ~ priors.feedθ
+        feedδ ~ priors.feedδ
+        feedχ1 ~ priors.feedχ1
+        feedχ2 ~ priors.feedχ2
+        return GenericJones(linear_feed_jones(feedθμ + feedθ, feedδμ + feedδ, feedχ1μ + feedχ1, feedχ2μ + feedχ2))
+    end
+end
+
 #     leakage_hier(; priors)
 #
 # Hierarchical leakage: each feed's real/imaginary parts are given by a mean, a standard
@@ -577,6 +633,7 @@ const LEAKAGE_SCHEMES = Dict{String, Any}(
     "leakage_disk_offsets" => leakage_disk_offsets,
     "leakage_disk_offsets_retarder" => leakage_disk_offsets_retarder,
     "leakage_feed_retarder" => leakage_feed_retarder,
+    "leakage_linear_feed" => leakage_linear_feed,
 )
 
 const SEGMENTATIONS = Dict{String, Any}(

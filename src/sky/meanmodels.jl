@@ -221,11 +221,11 @@ end
 # --- Student-t blob mean ---------------------------------------------------------------
 # A `TBlob(ν)` core, I ∝ (1 + r²/ν)^(-(ν+2)/2), whose tail falls as a power law. The tail is
 # sampled as `logη = -log ν`, so logη → -∞ is a Gaussian, and `fwhm` is the core's actual FWHM
-# at every ν. `fwhm0` and `beam` (radians) set the FWHM prior as in `GaussBkgdMean`.
+# at every ν. `fwhm0`, `beam` and `lower_beams` set the FWHM prior as in `GaussBkgdMean`.
 struct TBlobMean{T}
     fwhm0::T
-    beam::T
-    TBlobMean(fwhm0, beam) = (p = promote(fwhm0, beam); new{eltype(p)}(p...))
+    lower::T
+    TBlobMean(fwhm0, beam; lower_beams = 0.25) = (p = promote(fwhm0, lower_beams * beam); new{eltype(p)}(p...))
 end
 centerfix(::Type{<:TBlobMean}) = true
 
@@ -247,7 +247,7 @@ function make_mean(::TBlobMean, grid, θ)
     return mimg
 end
 
-genmeanprior(p::TBlobMean) = (fwhm = _core_fwhm_prior(p.fwhm0, p.beam), logη = _tblob_tail_prior())
+genmeanprior(p::TBlobMean) = (fwhm = _core_fwhm_prior(p.fwhm0, p.lower), logη = _tblob_tail_prior())
 
 # --- Anisotropic power law -------------------------------------------------------------
 # VLBISkyModels' `AnisotropicPowerLaw` with core radius `rcore` (radians), its n = 1, 2 slope
@@ -315,11 +315,11 @@ end
 struct GaussBkgdMean{M, T}
     bkgd::M
     fwhm0::T
-    beam::T
-    function GaussBkgdMean(grid::RectiGrid, fwhm0, beam)
+    lower::T
+    function GaussBkgdMean(grid::RectiGrid, fwhm0, beam; lower_beams = 0.25)
         bkgd = _disk_background(grid)
-        f0, b = promote(fwhm0, beam)
-        return new{typeof(bkgd), typeof(f0)}(bkgd, f0, b)
+        f0, lo = promote(fwhm0, lower_beams * beam)
+        return new{typeof(bkgd), typeof(f0)}(bkgd, f0, lo)
     end
 end
 centerfix(::Type{<:GaussBkgdMean}) = true
@@ -345,9 +345,10 @@ make_mean(p::GaussBkgdMean, grid, θ) = _gauss_bkgd_image(p.bkgd, grid, θ.fwhm,
 
 _bkgd_fraction_prior() = VLBITruncated(VLBIExponential(0.25); lower = 0.0, upper = 1.0)
 
-_core_fwhm_prior(fwhm0, beam) = VLBITruncated(VLBIGaussian(fwhm0, 0.4 * fwhm0); lower = 0.25 * beam, upper = 3.0 * fwhm0)
+# `lower` is the smallest core FWHM allowed (radians).
+_core_fwhm_prior(fwhm0, lower) = VLBITruncated(VLBIGaussian(fwhm0, 0.4 * fwhm0); lower, upper = 3.0 * fwhm0)
 
-genmeanprior(p::GaussBkgdMean) = (fwhm = _core_fwhm_prior(p.fwhm0, p.beam), fb = _bkgd_fraction_prior())
+genmeanprior(p::GaussBkgdMean) = (fwhm = _core_fwhm_prior(p.fwhm0, p.lower), fb = _bkgd_fraction_prior())
 
 # --- Gaussian of fixed FWHM blended with a disk background ------------------------------
 # `GaussBkgdMean` with the core FWHM held at `fwhm` (radians); only the background fraction
