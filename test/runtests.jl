@@ -1179,6 +1179,8 @@ Base.CoreLogging.handle_message(logger::StopAtMessage, level, message, args...; 
         fixed = FixedGaussBkgdMean(g, μas2rad(40.0))
         @test keys(BB.genmeanprior(free)) == (:fwhm, :fb)
         @test keys(BB.genmeanprior(fixed)) == (:fb,)
+        @test minimum(BB.genmeanprior(free).fwhm) ≈ μas2rad(5.0)
+        @test minimum(BB.genmeanprior(GaussBkgdMean(g, μas2rad(40.0), μas2rad(20.0); lower_beams = 0.05)).fwhm) ≈ μas2rad(1.0)
         @test BB.genmeanprior(fixed).fb == BB.genmeanprior(free).fb
         @test baseimage(BB.make_mean(fixed, g, (; fb = 0.3))) ≈
             baseimage(BB.make_mean(free, g, (; fwhm = μas2rad(40.0), fb = 0.3)))

@@ -81,6 +81,8 @@ type = "Bkgd"
 # absolute fwhm (μas) to override:
 fwhm_beams = 1.0
 # fwhm = 50.0    # μas (overrides fwhm_beams)
+# GaussBkgd / TBlob: the fitted FWHM is truncated below at fwhm_lower_beams × the data beam:
+# fwhm_lower_beams = 0.25
 
 [flux]
 # Total flux. One value = fixed; two values = a Uniform(lo, hi) prior that is fit.
