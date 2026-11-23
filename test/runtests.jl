@@ -221,6 +221,59 @@ Base.CoreLogging.handle_message(logger::StopAtMessage, level, message, args...; 
         @test all(n -> haskey(intm.prior, n), (:qwpθμ, :qwpημ, :feedδμ, :feedχμ, :qwpθ, :qwpη, :feedδ, :feedχ))
     end
 
+    @testset "leakage_linear_feed" begin
+        BB = BlackboxComrade
+        @test BB.required_params(BB.LEAKAGE_SCHEMES["leakage_linear_feed"]) ==
+            (:feedθμ, :feedδμ, :feedχ1μ, :feedχ2μ, :feedθ, :feedδ, :feedχ1, :feedχ2)
+        F(p...) = (j = BB.linear_feed_jones(p...); [j[1] j[3]; j[2] j[4]])
+        @test F(0.0, 0.0, 0.0, 0.0) ≈ [1 0; 0 1]
+        # Independent construction: the voltages of linear probes at angles θ and π/2 + θ + δ,
+        # elliptical by χ1 and χ2 about their own axes.
+        probe(t) = [cos(t) sin(t)]
+        elliptic(t, χ) = cos(χ) * probe(t) + im * sin(χ) * probe(t + π / 2)
+        V(θ, δ, χ1, χ2) = [elliptic(θ, χ1); elliptic(π / 2 + θ + δ, χ2)]
+        for p in ((0.1, 0.0, 0.0, 0.0), (0.0, -0.2, 0.0, 0.0), (0.0, 0.0, 0.1, 0.0), (0.0, 0.0, 0.0, -0.1), (1.2, -0.1, -0.2, 0.15))
+            @test F(p...) ≈ V(p...)
+        end
+        # θ is the same rotation as Comrade's feed-rotation offset: the feed rotation diag(e^{-iφ},
+        # e^{iφ}) in the circular basis, moved to a linear-feed station the way `JonesR` does it.
+        PT = BB.Comrade.ComradeBase.PolarizedTypes
+        Tc = Matrix(PT.basis_transform(PT.CirBasis(), PT.LinBasis()))
+        frot(φ) = Tc * Diagonal([cis(-φ), cis(φ)]) * Tc'
+        for θ in (0.3, -1.1, 2.0)
+            @test F(θ, 0.0, 0.0, 0.0) ≈ frot(θ)
+        end
+        @test F(0.4 + π, 0.1, 0.05, -0.02) ≈ -F(0.4, 0.1, 0.05, -0.02)
+        # first-order leakage
+        θ, δ, χ1, χ2 = 1.0e-4 .* (3, -2, 4, 1)
+        J = F(θ, δ, χ1, χ2)
+        @test J[1, 2] / J[1, 1] ≈ complex(θ, χ1) rtol = 1.0e-3
+        @test J[2, 1] / J[2, 2] ≈ complex(-(θ + δ), -χ2) rtol = 1.0e-3
+        lk(q) = (j = F(q...); d1 = j[1, 2] / j[1, 1]; d2 = j[2, 1] / j[2, 2]; [real(d1), imag(d1), real(d2), imag(d2)])
+        jac = reduce(hcat, [(lk(1.0e-6 .* (1:4 .== k)) - lk(-1.0e-6 .* (1:4 .== k))) / 2.0e-6 for k in 1:4])
+        @test rank(jac; rtol = 1.0e-6) == 4
+        # it traces under Reactant, as the runs use it
+        p = (1.2, -0.1, -0.2, 0.15)
+        jr = BlackboxComrade.Reactant.@jit BB.linear_feed_jones(BB.Reactant.ConcreteRNumber.(p)...)
+        @test collect(map(x -> convert(ComplexF64, x), jr)) ≈ collect(BB.linear_feed_jones(p...))
+        # the scheme sums the per-station values and the residuals
+        x = (feedθμ = 0.5, feedδμ = 0.03, feedχ1μ = -0.04, feedχ2μ = 0.02, feedθ = 0.01, feedδ = 0.02, feedχ1 = 0.01, feedχ2 = 0.0)
+        j = BB._leakage_linear_feed_pmap_1(x)
+        @test [j[1] j[3]; j[2] j[4]] ≈ F(0.51, 0.05, -0.03, 0.02)
+
+        cfg = exconfig("instrument_mixed.toml")
+        cfg["leakage"]["scheme"] = "leakage_linear_feed"
+        for n in ("feedθ", "feedδ", "feedχ1", "feedχ2")
+            cfg["priors"][n * "μ"] = Dict{String, Any}(
+                "seg" => "track", "dist" => Dict{String, Any}("dist" => "Normal", "args" => [0.0, 0.1])
+            )
+            cfg["priors"][n] = cfg["priors"]["d1re"]
+        end
+        intm = assemble_instrument(cfg)
+        @test intm isa InstrumentModel
+        @test all(n -> haskey(intm.prior, n), (:feedθμ, :feedδμ, :feedχ1μ, :feedχ2μ, :feedθ, :feedδ, :feedχ1, :feedχ2))
+    end
+
     @testset "instrument assembler" begin
         intm = build_instrument_config(exconfig("instrument_mixed.toml"))
         @test intm isa InstrumentModel
