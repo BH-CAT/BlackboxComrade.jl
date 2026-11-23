@@ -456,6 +456,22 @@ Base.CoreLogging.handle_message(logger::StopAtMessage, level, message, args...; 
             Dict{String, Any}("kind" => "Multi", "sites" => ["AA", "LM"], "val" => 0.0)
         @test build_instrument_config(cfgm) isa InstrumentModel
 
+        # a DeltaDist override pins its site through the referencing scheme and leaves the
+        # site priors; as a parameter's default it is an error
+        delta = Dict{String, Any}(
+            "seg" => "track", "dist" => Dict{String, Any}("dist" => "DeltaDist", "args" => [0.0])
+        )
+        pd = exconfig("instrument_mixed.toml")["priors"]["d1re"]
+        pd["overrides"]["LM"] = delta
+        ap = BlackboxComrade._build_array_prior(pd, "d1re")
+        @test ap.refant isa BlackboxComrade.Comrade.CompositeReference
+        @test ap.refant.schemes == (NoReference(), SingleReference(:LM, 0.0))
+        @test keys(ap.override_dist) == (:AA,)
+        cfgd = exconfig("instrument_mixed.toml")
+        cfgd["priors"]["d1re"] = pd
+        @test build_instrument_config(cfgd) isa InstrumentModel
+        @test_throws "DeltaDist is accepted only as a per-site override" BlackboxComrade._build_array_prior(delta, "d1re")
+
         # gauge = "phase" marks a parameter as one summand of the station phase, and the
         # top-level gaugefix says what to do when the summands leave it under-determined
         cfgg = exconfig("instrument_mixed.toml")

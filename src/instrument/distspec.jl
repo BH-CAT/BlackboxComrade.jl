@@ -23,6 +23,9 @@
 # and no singular point, and has no flat transform; `σ = 2.44` matches `DiagonalVonMises` of
 # width π.
 #
+# `DeltaDist` takes `args = [value]`: the parameter is fixed to `value` and uses no latent
+# coordinate.
+#
 # `LogNormal` takes `args = [mu, sigma]` (mu = log of the median) and is built as the `exp`
 # pushforward of a `VLBIGaussian`: the unconstrained coordinate is exactly `log` of the
 # sampled value.
@@ -40,6 +43,7 @@ const _DIST_ALLOWLIST = Dict{String, Function}(
     "AngularProjectedNormal" => (a...) -> PT.AngularProjectedNormal(a...),
     "WrappedNormal" => (a...) -> PT.WrappedNormal(a...),
     "LogNormal" => (a...) -> PT.PushforwardDistribution(exp, VLBIImagePriors.VLBIGaussian(a...)),
+    "DeltaDist" => (a...) -> PT.DeltaDist(only(a)),
 )
 
 """

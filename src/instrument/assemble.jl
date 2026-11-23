@@ -78,6 +78,8 @@ function _site_prior(t::AbstractDict, where_::AbstractString)
     end
 end
 
+_isdelta(p) = p isa IIDSitePrior && p.dist isa PT.DeltaDist
+
 function _build_array_prior(pcfg::AbstractDict, name::AbstractString)
     check_config_keys(
         pcfg,
@@ -88,6 +90,10 @@ function _build_array_prior(pcfg::AbstractDict, name::AbstractString)
         "[priors.$name]",
     )
     default = _site_prior(pcfg, "[priors.$name]")
+    _isdelta(default) && error(
+        "[priors.$name] has a DeltaDist as its default; DeltaDist is accepted only as a " *
+            "per-site override"
+    )
     phase = Bool(get(pcfg, "phase", false))
     refant = _parse_refant(get(pcfg, "refant", nothing))
     # `gauge = "phase"` declares this parameter one summand of the absolute station phase,
@@ -107,6 +113,12 @@ function _build_array_prior(pcfg::AbstractDict, name::AbstractString)
         )
         return Symbol(site) => _site_prior(scfg, "[priors.$name.overrides.$site]")
     end
+    # A DeltaDist override fixes every entry of that site to its value. Comrade's site priors
+    # cannot mix a point mass with other distributions, so the site is pinned through the
+    # referencing scheme instead (a site absent from the data pins nothing).
+    pins = [SingleReference(s, p.dist.x0) for (s, p) in ovr_pairs if _isdelta(p)]
+    filter!(!_isdelta ∘ last, ovr_pairs)
+    isempty(pins) || (refant = Comrade.CompositeReference(refant, pins...))
     ovr = NamedTuple(ovr_pairs)
 
     # GaussMarkov site priors are incompatible with a phase-wrapped ArrayPrior; catch it
