@@ -126,6 +126,8 @@ Base.@kwdef struct FittingStrategy
     # is available).
     device::Union{Nothing, String} = nothing
     benchmark::Bool = true
+    # posterior draws rendered to FITS images after sampling, chosen without replacement
+    posterior_images::Int = 500
     # On the Reactant path, check the device log-density+gradient against the CPU/Enzyme
     # reference at a prior draw before optimizing, and error on mismatch (catches broken
     # device models that silently produce garbage fits).
@@ -194,6 +196,10 @@ autocorrelation times of the scalar parameters in units of the trajectory length
 checkpoints are errors with either algorithm, and `max_tree_depth` is an error with MCLMC. `run.start` may also name the
 run base of an MCLMC or WALNUTS run (the directory holding its `chain_k`), whose chains' last
 draws start the chains one to one.
+
+`run.posterior_images` (default 500) is the number of posterior draws, chosen at random
+without replacement, that are rendered to FITS images after sampling (all of them when the
+chains hold fewer); 0 writes none.
 
 `run.device` (`"cpu"` or `"gpu"`) selects the Reactant backend and needs
 `run.use_reactant = true`. Left out, Reactant uses a GPU when one is available and the CPU
@@ -288,12 +294,14 @@ function build_fitting_config(cfg::AbstractDict)
         run,
         (
             "use_reactant", "benchmark", "verify_reactant", "start", "sample_checkpoint",
-            "checkpoint", "latent_space", "warmup_checkpoint", "device",
+            "checkpoint", "latent_space", "warmup_checkpoint", "device", "posterior_images",
         ),
         "[run]"
     )
 
     use_reactant = Bool(get(run, "use_reactant", false))
+    posterior_images = Int(get(run, "posterior_images", 500))
+    posterior_images >= 0 || error("run.posterior_images must be at least 0, got $posterior_images")
     ahmc_only = filter(k -> haskey(samp, k), ["target_accept", "init_buffer", "term_buffer"])
     (use_reactant && !isempty(ahmc_only)) && error(
         "sampler.$(join(ahmc_only, ", sampler.")) apply to AdvancedHMC NUTS only " *
@@ -472,6 +480,7 @@ function build_fitting_config(cfg::AbstractDict)
         use_reactant = use_reactant,
         device,
         benchmark = Bool(get(run, "benchmark", true)),
+        posterior_images,
         verify_reactant = Bool(get(run, "verify_reactant", false)),
         start = start,
         # `checkpoint` is accepted as an alias for `sample_checkpoint`.

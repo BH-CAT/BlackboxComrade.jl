@@ -232,12 +232,26 @@ centerfix(::Type{<:TBlobMean}) = true
 # Half-maximum radius of the unit-scale `TBlob(ν)`.
 _tblob_halfwidth(ν) = sqrt(ν * (2^(2 / (ν + 2)) - 1))
 
-# ν from 0.1 to 100; `TBlob`'s normalization overflows past ν ≈ 340.
+# ν from 0.1 to 100.
 _tblob_tail_prior() = VLBIUniform(log(0.01), log(10.0))
+
+# The unit-flux unit-scale `TBlob(ν)`, (1 + r²/ν)^(-(ν+2)/2) / 2π. VLBISkyModels' `TBlob`
+# computes the same constant 1/2π as a ratio of gamma functions, whose second derivatives
+# Reactant returns as NaN or wrong values, which breaks the Hessian-vector products of the
+# kinetic samplers' curvature estimates.
+struct TBlobProfile{T} <: VLBISkyModels.GeometricModel{T}
+    slope::T
+end
+VLBISkyModels.visanalytic(::Type{<:TBlobProfile}) = VLBISkyModels.NotAnalytic()
+VLBISkyModels.radialextent(m::TBlobProfile) = 5 * m.slope / (m.slope - 2)
+function VLBISkyModels.intensity_point(m::TBlobProfile, p)
+    r² = p.X^2 + p.Y^2
+    return (1 + r² / m.slope)^(-(m.slope + 2) / 2) / (2 * oftype(float(m.slope), π))
+end
 
 function _tblob_core(fwhm, logη)
     ν = exp(-logη)
-    return modify(TBlob(ν), Stretch(fwhm / (2 * _tblob_halfwidth(ν))))
+    return modify(TBlobProfile(ν), Stretch(fwhm / (2 * _tblob_halfwidth(ν))))
 end
 
 function make_mean(::TBlobMean, grid, θ)

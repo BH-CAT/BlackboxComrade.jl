@@ -64,6 +64,7 @@ chunk_size = 100
 use_reactant = false
 # device = "gpu"        # Reactant only: "cpu" or "gpu" (default: a GPU when available)
 benchmark = true
+# posterior_images = 500  # posterior draws rendered to FITS images after sampling (0: none)
 sample_checkpoint = 0   # Reactant only: render a checkpoint (FITS + PNG + residuals) every N
                         # sampling samples (also the sampling disk stride). 0 disables it.
 # start = "/path/to/start.jls"   # warm-start from a serialized parameter vector

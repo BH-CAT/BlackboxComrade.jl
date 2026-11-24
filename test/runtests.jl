@@ -221,6 +221,26 @@ Base.CoreLogging.handle_message(logger::StopAtMessage, level, message, args...; 
         @test all(n -> haskey(intm.prior, n), (:qwpθμ, :qwpημ, :feedδμ, :feedχμ, :qwpθ, :qwpη, :feedδ, :feedχ))
     end
 
+    @testset "leakage_feed_retarder_track" begin
+        BB = BlackboxComrade
+        @test BB.required_params(BB.LEAKAGE_SCHEMES["leakage_feed_retarder_track"]) ==
+            (:qwpθ, :qwpη, :feedδ, :feedχ)
+        x = (qwpθ = 0.11, qwpη = -0.05, feedδ = 0.05, feedχ = -0.03)
+        j = BB._leakage_feed_retarder_track_pmap_1(x)
+        @test collect(j) ≈ collect(BB.feed_retarder_jones(0.11, -0.05, 0.05, -0.03))
+
+        cfg = exconfig("instrument_mixed.toml")
+        cfg["leakage"]["scheme"] = "leakage_feed_retarder_track"
+        for n in ("qwpθ", "qwpη", "feedδ", "feedχ")
+            cfg["priors"][n] = Dict{String, Any}(
+                "seg" => "track", "dist" => Dict{String, Any}("dist" => "Normal", "args" => [0.0, 0.1])
+            )
+        end
+        intm = assemble_instrument(cfg)
+        @test intm isa InstrumentModel
+        @test all(n -> haskey(intm.prior, n), (:qwpθ, :qwpη, :feedδ, :feedχ))
+    end
+
     @testset "instrument assembler" begin
         intm = build_instrument_config(exconfig("instrument_mixed.toml"))
         @test intm isa InstrumentModel
@@ -601,6 +621,12 @@ Base.CoreLogging.handle_message(logger::StopAtMessage, level, message, args...; 
         @test s.nsample == 10_000
         @test !s.use_reactant
         @test isnothing(s.start)
+        @test s.posterior_images == 500
+        cfgi = exconfig("fitting.toml")
+        cfgi["run"]["posterior_images"] = 200
+        @test build_fitting_config(cfgi).posterior_images == 200
+        cfgi["run"]["posterior_images"] = -1
+        @test_throws "run.posterior_images must be at least 0, got -1" build_fitting_config(cfgi)
         # `checkpoint` is accepted as an alias for `sample_checkpoint` (which wins when both
         # are set, so drop the explicit key first)
         cfg = exconfig("fitting.toml")
@@ -1134,6 +1160,13 @@ Base.CoreLogging.handle_message(logger::StopAtMessage, level, message, args...; 
         @test keys(BB.genmeanprior(core)) == (:fwhm, :logη)
         gauss = baseimage(intensitymap(modify(Gaussian(), Stretch(μas2rad(40.0) / BB.fwhmfac)), g))
         @test baseimage(BB.make_mean(core, g, (; fwhm = μas2rad(40.0), logη = log(0.01)))) ≈ gauss ./ sum(gauss) rtol = 0.02
+        # the profile is VLBISkyModels' `TBlob`, without its gamma-function normalization
+        for ν in (0.5, 4.0, 60.0)
+            s = μas2rad(15.0)
+            ref = baseimage(intensitymap(modify(TBlob(ν), Stretch(s)), g))
+            new = baseimage(intensitymap(modify(BB.TBlobProfile(ν), Stretch(s)), g))
+            @test new ≈ ref rtol = 1.0e-12
+        end
         icfg = exconfig("image.toml")
         icfg["mean"] = Dict{String, Any}("type" => "TBlob", "fwhm" => 40.0)
         skym, _ = build_sky_config(icfg)

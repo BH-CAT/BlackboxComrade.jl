@@ -491,9 +491,9 @@ function comrade_imager(
         plot_chain_residuals_png(imgbase * "_residuals.png", post, sample(chain, nres))
     end
 
-    @info "Saving posterior images"
-    ndraws = min(500, nchain)
-    samples = skymodel.(Ref(post), sample(chain, ndraws))
+    ndraws = min(strategy.posterior_images, nchain)
+    @info "Saving $ndraws posterior images"
+    samples = skymodel.(Ref(post), sample(chain, ndraws; replace = false))
     save_posterior_draws(outimg, outbase, post, samples, gimg)
     return out
 end

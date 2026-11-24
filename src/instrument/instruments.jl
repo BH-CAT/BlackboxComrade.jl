@@ -526,6 +526,23 @@ end
     end
 end
 
+#     leakage_feed_retarder_track(; priors)
+#
+# `leakage_feed_retarder` without the residuals: the plate's fast-axis angle qwpθ and
+# retardance qwpη, the probes' departure from orthogonality feedδ and their common ellipticity
+# feedχ, in radians, each one value per station (typically `seg = "track"`). It describes a
+# receiver whose polarizer is a passive waveguide held at a fixed temperature, so that its
+# leakage does not change over a track.
+@instrument function leakage_feed_retarder_track(; priors)
+    return @jones begin
+        qwpθ ~ priors.qwpθ
+        qwpη ~ priors.qwpη
+        feedδ ~ priors.feedδ
+        feedχ ~ priors.feedχ
+        return GenericJones(feed_retarder_jones(qwpθ, qwpη, feedδ, feedχ))
+    end
+end
+
 #     leakage_hier(; priors)
 #
 # Hierarchical leakage: each feed's real/imaginary parts are given by a mean, a standard
@@ -577,6 +594,7 @@ const LEAKAGE_SCHEMES = Dict{String, Any}(
     "leakage_disk_offsets" => leakage_disk_offsets,
     "leakage_disk_offsets_retarder" => leakage_disk_offsets_retarder,
     "leakage_feed_retarder" => leakage_feed_retarder,
+    "leakage_feed_retarder_track" => leakage_feed_retarder_track,
 )
 
 const SEGMENTATIONS = Dict{String, Any}(
