@@ -554,6 +554,20 @@ Base.CoreLogging.handle_message(logger::StopAtMessage, level, message, args...; 
         @test_throws ErrorException parse_flagtable(Dict{String, Any}("site" => ["AA"]))
     end
 
+    @testset "coherency fractional noise" begin
+        # Gain term ferr|Vᵢⱼ| on every element; leakage term from the other feed of each station:
+        # parallel hands from the cross hands and the reverse. Missing entries add nothing.
+        V = [1.0+0.1im 0.1-0.05im; 0.2+0.0im 0.9-0.1im]
+        L = BlackboxComrade.leakage_power(V)
+        p = abs2(V[1, 1]) + abs2(V[2, 2])
+        c = abs2(V[1, 2]) + abs2(V[2, 1])
+        @test L ≈ [c p; p c]
+        single = [1.0+0im NaN; 0.5+0im NaN]
+        @test BlackboxComrade.leakage_power(single) ≈ [0.25 1.0; 1.0 0.25]
+        @test_throws DimensionMismatch BlackboxComrade.leakage_power(zeros(3, 3))
+        @test_throws "applies only to coherency data" BlackboxComrade.add_coherency_noise([1.0], 0.01, 0.005)
+    end
+
     @testset "polarization-basis corrections" begin
         flags = parse_flagtable(
             Dict{String, Any}(

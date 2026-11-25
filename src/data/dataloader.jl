@@ -12,6 +12,7 @@ function build_data_uvfits(
         avg = "scan",
         scan_gap::Real = 20.0,
         ferr::Float64 = 0.005,
+        ferr_leak::Float64 = 0.0,
         trange = nothing,
         IF = nothing,
         polrep::PolRep = PolExp(),
@@ -67,7 +68,7 @@ function build_data_uvfits(
         reset_mounts!(dvis, array)
     end
 
-    dvis = add_fractional_noise(dvis, ferr)
+    dvis = add_coherency_noise(dvis, ferr, ferr_leak)
     conjugate && (dvis = conjugate_data(dvis))
     return dvis
 end
@@ -174,6 +175,7 @@ function build_data_dlist(
         file::String, array::Union{String, Nothing} = nothing;
         avg = "scan",
         ferr::Float64 = 0.005,
+        ferr_leak::Float64 = 0.0,
         trange = nothing,
         polrep::PolRep = PolExp(),
     )
@@ -201,6 +203,6 @@ function build_data_dlist(
     else
         dcoh1 = dcoh0
     end
-    dcoh2 = add_fractional_noise(dcoh1, ferr)
+    dcoh2 = add_coherency_noise(dcoh1, ferr, ferr_leak)
     return dcoh2
 end

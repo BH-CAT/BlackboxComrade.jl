@@ -53,6 +53,7 @@ include("data/arraytable.jl")
 include("data/dlist.jl")
 include("data/corrpol.jl")
 include("data/flagtable.jl")
+include("data/fractional_noise.jl")
 include("data/dataloader.jl")
 
 # --- instrument models + generic assembler ---------------------------------------------

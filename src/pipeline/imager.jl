@@ -137,7 +137,7 @@ function _optimize_tempered(imgbase, skym, intm, data, imgdata, strategy, opt, r
     held = Dict{Symbol, Float64}()
     nstage = length(strategy.noise_schedule)
     for (i, frac) in enumerate(strategy.noise_schedule)
-        dat_i = frac == 0.0 ? data : map(d -> add_fractional_noise(d, frac), data)
+        dat_i = frac == 0.0 ? data : map(d -> add_coherency_noise(d, frac), data)
         post_i = VLBIPosterior(skym, intm, dat_i...; imgdata)
         if i == 1 && !isempty(strategy.fix_scales)
             held = held_scale_values(post_i, strategy.fix_scales)
