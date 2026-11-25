@@ -197,9 +197,9 @@ checkpoints are errors with either algorithm, and `max_tree_depth` is an error w
 run base of an MCLMC or WALNUTS run (the directory holding its `chain_k`), whose chains' last
 draws start the chains one to one.
 
-`run.posterior_images` (default 500) is the number of posterior draws, chosen at random
-without replacement, that are rendered to FITS images after sampling (all of them when the
-chains hold fewer); 0 writes none.
+`run.posterior_images` (default 500) is the number of posterior draws rendered to FITS images
+after sampling (all of them when the chains hold fewer); 0 writes none. The draws are evenly
+spaced through each chain, with the chains contributing equally.
 
 `run.device` (`"cpu"` or `"gpu"`) selects the Reactant backend and needs
 `run.use_reactant = true`. Left out, Reactant uses a GPU when one is available and the CPU

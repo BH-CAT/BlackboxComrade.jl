@@ -493,7 +493,9 @@ function comrade_imager(
 
     ndraws = min(strategy.posterior_images, nchain)
     @info "Saving $ndraws posterior images"
-    samples = skymodel.(Ref(post), sample(chain, ndraws; replace = false))
+    # Evenly spaced through the draws × chains order, so each chain contributes equally.
+    draws = vec(Comrade.postsamples(chain))
+    samples = skymodel.(Ref(post), draws[firstindex(draws) .+ fld.((0:(ndraws - 1)) .* length(draws), ndraws)])
     save_posterior_draws(outimg, outbase, post, samples, gimg)
     return out
 end
