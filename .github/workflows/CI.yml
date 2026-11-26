@@ -25,9 +25,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Reactant and Enzyme do not resolve on later Julia versions yet.
         version:
-          - '1.12'
+          - '1'
         os:
           - ubuntu-latest
         arch:
