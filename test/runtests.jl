@@ -558,7 +558,7 @@ Base.CoreLogging.handle_message(logger::StopAtMessage, level, message, args...; 
         BB = BlackboxComrade
         # a zero-length scan, a time on an upper edge, and a time before a start
         t1, t2, t3 = 8.766722222222223, 9.766721944444445, 10.133389166666667
-        start = [t1, 9.70, 10.14]
+        start = [t1, 9.7, 10.14]
         stop = [t1, t2, 10.25]
         times = [t1, 9.72, t2, t3, 10.2]
         @test count(t -> BB.scans_containing(t, BB.scanseg_intervals(start, stop)) == 0, times) == 3
@@ -566,7 +566,7 @@ Base.CoreLogging.handle_message(logger::StopAtMessage, level, message, args...; 
         s, e, orphans = BB.cover_times(start, stop, times)
         @test orphans == [t1, t2, t3]
         @test all(t -> BB.scans_containing(t, BB.scanseg_intervals(s, e)) == 1, times)
-        @test start == [t1, 9.70, 10.14] && stop == [t1, t2, 10.25]
+        @test start == [t1, 9.7, 10.14] && stop == [t1, t2, 10.25]
 
         s2, e2, orphans2 = BB.cover_times(s, e, times)
         @test isempty(orphans2) && s2 == s && e2 == e
@@ -577,12 +577,12 @@ Base.CoreLogging.handle_message(logger::StopAtMessage, level, message, args...; 
     @testset "coherency fractional noise" begin
         # Gain term ferr|Vᵢⱼ| on every element; leakage term from the other feed of each station:
         # parallel hands from the cross hands and the reverse. Missing entries add nothing.
-        V = [1.0+0.1im 0.1-0.05im; 0.2+0.0im 0.9-0.1im]
+        V = [1.0 + 0.1im 0.1 - 0.05im; 0.2 + 0.0im 0.9 - 0.1im]
         L = BlackboxComrade.leakage_power(V)
         p = abs2(V[1, 1]) + abs2(V[2, 2])
         c = abs2(V[1, 2]) + abs2(V[2, 1])
         @test L ≈ [c p; p c]
-        single = [1.0+0im NaN; 0.5+0im NaN]
+        single = [1.0 + 0im NaN; 0.5 + 0im NaN]
         @test BlackboxComrade.leakage_power(single) ≈ [0.25 1.0; 1.0 0.25]
         @test_throws DimensionMismatch BlackboxComrade.leakage_power(zeros(3, 3))
         @test_throws "applies only to coherency data" BlackboxComrade.add_coherency_noise([1.0], 0.01, 0.005)
