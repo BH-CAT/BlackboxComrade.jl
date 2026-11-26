@@ -554,6 +554,27 @@ Base.CoreLogging.handle_message(logger::StopAtMessage, level, message, args...; 
         @test_throws ErrorException parse_flagtable(Dict{String, Any}("site" => ["AA"]))
     end
 
+    @testset "scan coverage repair" begin
+        BB = BlackboxComrade
+        # a single-timestamp scan (start == stop), a time on a scan's upper edge, and a time
+        # just before a scan's start, each of which Comrade's ScanSeg lookup misses
+        t1, t2, t3 = 8.766722222222223, 9.766721944444445, 10.133389166666667
+        start = [t1, 9.70, 10.14]
+        stop = [t1, t2, 10.25]
+        times = [t1, 9.72, t2, t3, 10.2]
+        @test count(t -> BB.scans_containing(t, BB.scanseg_intervals(start, stop)) == 0, times) == 3
+
+        s, e, orphans = BB.cover_times(start, stop, times)
+        @test orphans == [t1, t2, t3]
+        @test all(t -> BB.scans_containing(t, BB.scanseg_intervals(s, e)) == 1, times)
+        @test start == [t1, 9.70, 10.14] && stop == [t1, t2, 10.25]
+
+        s2, e2, orphans2 = BB.cover_times(s, e, times)
+        @test isempty(orphans2) && s2 == s && e2 == e
+
+        @test_throws "lies in 2 scans" BB.cover_times([1.0, 1.5], [2.0, 2.5], [1.7])
+    end
+
     @testset "coherency fractional noise" begin
         # Gain term ferr|Vᵢⱼ| on every element; leakage term from the other feed of each station:
         # parallel hands from the cross hands and the reverse. Missing entries add nothing.
