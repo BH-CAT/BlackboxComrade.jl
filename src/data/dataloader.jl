@@ -139,11 +139,8 @@ end
 """
     repair_scan_coverage(dvis) -> dvis
 
-Make every averaged timestamp fall inside exactly one scan of the scan table, as
-scan-segmented instrument parameters require (`set_array` otherwise throws "not found in
-SiteArray"). Timestamps can miss the table in two ways: fixed-interval averaging puts a
-time on or beyond a scan edge, and a scan-averaged file can hold single-timestamp scans
-with `start == stop`, which a half-open interval cannot contain. See [`cover_times`](@ref).
+Widen the scan table so every timestamp lies in exactly one scan, as scan-segmented
+instrument parameters require. See [`cover_times`](@ref).
 """
 function repair_scan_coverage(dvis)
     arr = arrayconfig(dvis)
@@ -155,7 +152,6 @@ function repair_scan_coverage(dvis)
     return @set dvis.config = newarr
 end
 
-# Comrade's `ScanSeg` intervals for these scan edges; `timestamps` reads only `scans` and `mjd`.
 scanseg_intervals(start, stop) =
     Comrade.timestamps(ScanSeg(), (; scans = StructArray((; start, stop)), mjd = 0))
 
@@ -164,12 +160,10 @@ scans_containing(t, intervals) = count(s -> t ∈ s, intervals)
 """
     cover_times(start, stop, times; pad = 1.0e-3 / 3600) -> (start, stop, orphans)
 
-Return copies of the scan edges `start` and `stop` (hours) widened so that each of `times`
-lies in exactly one scan under Comrade's `ScanSeg` lookup, plus the `orphans`: the times
-no scan contained before widening. The scan nearest an orphan is widened to reach at least
-`pad` hours past it on both sides; the margin keeps the time inside after Comrade rebuilds
-each scan as a half-open center ± half-width interval, where an edge placed exactly at the
-time can round to either side. Throws if a time still lies in zero or several scans.
+Return copies of the scan edges `start` and `stop` (hours) in which each of `times` lies in
+exactly one Comrade `ScanSeg` interval, and the `orphans` that no scan contained. Each
+orphan's nearest scan is widened to `pad` beyond it on both sides; an edge exactly at the
+time can round to the wrong side. Throws if a time still lies in zero or several scans.
 """
 function cover_times(start, stop, times; pad = 1.0e-3 / 3600)
     start, stop = copy(start), copy(stop)

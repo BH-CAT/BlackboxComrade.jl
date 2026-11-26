@@ -556,8 +556,7 @@ Base.CoreLogging.handle_message(logger::StopAtMessage, level, message, args...; 
 
     @testset "scan coverage repair" begin
         BB = BlackboxComrade
-        # a single-timestamp scan (start == stop), a time on a scan's upper edge, and a time
-        # just before a scan's start, each of which Comrade's ScanSeg lookup misses
+        # a zero-length scan, a time on an upper edge, and a time before a start
         t1, t2, t3 = 8.766722222222223, 9.766721944444445, 10.133389166666667
         start = [t1, 9.70, 10.14]
         stop = [t1, t2, 10.25]
