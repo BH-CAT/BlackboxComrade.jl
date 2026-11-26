@@ -166,21 +166,21 @@ orphan's nearest scan is widened to `pad` beyond it on both sides; an edge exact
 time can round to the wrong side. Throws if a time still lies in zero or several scans.
 """
 function cover_times(start, stop, times; pad = 1.0e-3 / 3600)
-    start, stop = copy(start), copy(stop)
+    newstart, newstop = copy(start), copy(stop)
     orphans = eltype(times)[]
     for t in times
-        scans_containing(t, scanseg_intervals(start, stop)) > 0 && continue
+        scans_containing(t, scanseg_intervals(newstart, newstop)) > 0 && continue
         push!(orphans, t)
-        i = argmin(i -> max(start[i] - t, t - stop[i]), eachindex(start, stop))
-        start[i] = min(start[i], t - pad)
-        stop[i] = max(stop[i], t + pad)
+        i = argmin(i -> max(newstart[i] - t, t - newstop[i]), eachindex(newstart, newstop))
+        newstart[i] = min(newstart[i], t - pad)
+        newstop[i] = max(newstop[i], t + pad)
     end
-    intervals = scanseg_intervals(start, stop)
+    intervals = scanseg_intervals(newstart, newstop)
     for t in times
         n = scans_containing(t, intervals)
         n == 1 || error("averaged time $t h lies in $n scans of the repaired scan table")
     end
-    return start, stop, orphans
+    return newstart, newstop, orphans
 end
 
 function build_data_dlist(
