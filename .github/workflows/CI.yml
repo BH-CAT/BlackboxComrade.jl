@@ -17,8 +17,6 @@ env:
 jobs:
   test:
     name: Julia ${{ matrix.version }} - ${{ matrix.os }} - ${{ matrix.arch }}
-    # The tests run locally before a merge; this job runs only when started by hand.
-    if: ${{ github.event_name == 'workflow_dispatch' }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     permissions: # needed to allow julia-actions/cache to proactively delete old caches that it has created
