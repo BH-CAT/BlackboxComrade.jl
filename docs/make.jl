@@ -20,4 +20,5 @@ makedocs(;
 deploydocs(;
     repo = "github.com/BH-CAT/BlackboxComrade.jl",
     devbranch = "main",
+    push_preview = true,
 )
