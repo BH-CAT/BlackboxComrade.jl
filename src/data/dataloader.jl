@@ -139,36 +139,48 @@ end
 """
     repair_scan_coverage(dvis) -> dvis
 
-Fixed-interval time averaging can put a bin-center timestamp outside the scan boundaries
-recorded in the data file (data taken just before the nominal scan start average to a
-center ahead of it). Scan-segmented instrument parameters look segments up with the
-half-open interval `start ≤ t < stop`, so such orphan timestamps make `set_array` throw
-"not found in SiteArray". Stretch the nearest scan edge to cover each orphan time.
+Widen the scan table so every timestamp lies in exactly one scan, as scan-segmented
+instrument parameters require. See [`cover_times`](@ref).
 """
 function repair_scan_coverage(dvis)
     arr = arrayconfig(dvis)
-    sc = arr.scans
-    start = copy(sc.start)
-    stop = copy(sc.stop)
-    orphans = eltype(start)[]
-    for t in unique(arr[:Ti])
-        any(i -> start[i] <= t < stop[i], eachindex(start, stop)) && continue
-        push!(orphans, t)
-        dist(i) = t < start[i] ? start[i] - t : t - stop[i]
-        i = argmin(dist, eachindex(start, stop))
-        if t < start[i]
-            start[i] = t
-        else
-            # half-open upper edge: nudge past t so `t < stop` holds
-            stop[i] = nextfloat(t)
-        end
-    end
+    start, stop, orphans = cover_times(arr.scans.start, arr.scans.stop, unique(arr[:Ti]))
     isempty(orphans) && return dvis
     @warn "$(length(orphans)) averaged timestamp(s) fell outside the scan table; " *
         "stretched the nearest scan edges to cover them." orphans
-    newscans = StructArray((start = start, stop = stop))
-    newarr = @set arr.scans = newscans
+    newarr = @set arr.scans = StructArray((; start, stop))
     return @set dvis.config = newarr
+end
+
+scanseg_intervals(start, stop) =
+    Comrade.timestamps(ScanSeg(), (; scans = StructArray((; start, stop)), mjd = 0))
+
+scans_containing(t, intervals) = count(s -> t ∈ s, intervals)
+
+"""
+    cover_times(start, stop, times; pad = 1.0e-3 / 3600) -> (start, stop, orphans)
+
+Return copies of the scan edges `start` and `stop` (hours) in which each of `times` lies in
+exactly one Comrade `ScanSeg` interval, and the `orphans` that no scan contained. Each
+orphan's nearest scan is widened to `pad` beyond it on both sides; an edge exactly at the
+time can round to the wrong side. Throws if a time still lies in zero or several scans.
+"""
+function cover_times(start, stop, times; pad = 1.0e-3 / 3600)
+    newstart, newstop = copy(start), copy(stop)
+    orphans = eltype(times)[]
+    for t in times
+        scans_containing(t, scanseg_intervals(newstart, newstop)) > 0 && continue
+        push!(orphans, t)
+        i = argmin(i -> max(newstart[i] - t, t - newstop[i]), eachindex(newstart, newstop))
+        newstart[i] = min(newstart[i], t - pad)
+        newstop[i] = max(newstop[i], t + pad)
+    end
+    intervals = scanseg_intervals(newstart, newstop)
+    for t in times
+        n = scans_containing(t, intervals)
+        n == 1 || error("averaged time $t h lies in $n scans of the repaired scan table")
+    end
+    return newstart, newstop, orphans
 end
 
 function build_data_dlist(
