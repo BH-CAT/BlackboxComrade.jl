@@ -59,8 +59,7 @@ jobs:
           fail_ci_if_error: false
   docs:
     name: Documentation
-    # Builds and deploys the documentation for main and tags.
-    if: ${{ github.event_name != 'pull_request' }}
+    # Builds the documentation on every trigger; deploys only for main and tags.
     runs-on: ubuntu-latest
     permissions:
       actions: write # needed to allow julia-actions/cache to proactively delete old caches that it has created
